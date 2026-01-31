@@ -8,6 +8,12 @@ AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating 
 
 ## Commands
 
+**Запуск через venv (рекомендуется):**
+```bash
+"c:\DevWB\AF Dags Helper\venv\Scripts\python.exe" "c:\DevWB\AF Dags Helper\main.py" path/to/dag.py
+```
+
+**Или при активированном venv:**
 ```bash
 # GUI application
 python gui/app.py

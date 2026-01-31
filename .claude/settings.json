@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\":*)",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\DevWB\\\\AF Dags Helper\\\\test_against_samples.py\")"
+    ]
+  }
+}

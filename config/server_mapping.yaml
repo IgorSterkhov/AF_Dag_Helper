@@ -1,14 +1,18 @@
 # Маппинг серверов: Airflow Connection ID -> OpenMetadata Server Name
-# Если маппинг не указан - используется connection ID как есть (passthrough)
+# Поддерживаются wildcard-паттерны: * (любые символы), ? (один символ)
 #
 # Примеры:
-#   do-ch3: clickhouse-prod-3
-#   do-ch13: dm13
-#   do-lake-m: lake-main
-#   remote_ch: remote-clickhouse
+#   do-ch4*: do-ch4       # do-ch4-pr, do-ch4-dl → do-ch4
+#   do-pg?-*: do-pg       # do-pg1-bo, do-pg2-xx → do-pg
+#
+# Точные маппинги имеют приоритет над wildcard.
+# При нескольких wildcard-совпадениях используется первый в списке.
 
 server_mapping:
   do-ch-deliverytime: do-ch13
+  do-ch4*: do-ch4         # do-ch4-pr, do-ch4-dl, do-ch4-dp → do-ch4
+  do-ch8*: do-ch8         # do-ch8-xc и другие
+  do-pg1*: do-pg1         # do-pg1-bo и другие
 
 # Поведение по умолчанию при отсутствии маппинга:
 # - passthrough: использовать connection_id как server name

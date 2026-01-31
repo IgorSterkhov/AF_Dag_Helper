@@ -1769,8 +1769,8 @@ with DAG(
             OMEntity(entity=Entity.TABLE, fqn="do-lake-m.buffer.recent_order_uids_darkstore"), 
             OMEntity(entity=Entity.TABLE, fqn="do-lake-m.buffer.order_uids_from_darkstore"), 
             OMEntity(entity=Entity.TABLE, fqn="do-lake-m.datamart.order_uids_from_darkstore"),
-            OMEntity(entity=Entity.TABLE, fqn="do-ch13.buffer.speeds_in_darkstore"),
-            OMEntity(entity=Entity.TABLE, fqn="do-ch13.datamart.speeds_in_darkstore")])    
+            OMEntity(entity=Entity.TABLE, fqn="do-ch-deliverytime.buffer.speeds_in_darkstore"),
+            OMEntity(entity=Entity.TABLE, fqn="do-ch-deliverytime.datamart.speeds_in_darkstore")])    
 
     nm_from_darkstore_hourly_task >> nm_from_darkstore_daily_task
     speeds_in_darkstore_hourly_task >> speeds_in_darkstore_daily_task

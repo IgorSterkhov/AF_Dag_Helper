@@ -6,7 +6,7 @@
 
 1. Запусти скрипт тестирования:
    ```bash
-   python test_against_samples.py
+   "c:\DevWB\AF Dags Helper\venv\Scripts\python.exe" "c:\DevWB\AF Dags Helper\test_against_samples.py"
    ```
 
 2. Проанализируй результаты:

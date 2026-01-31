@@ -1,5 +1,6 @@
 """FQN Builder с маппингом серверов."""
 
+import fnmatch
 import yaml
 from pathlib import Path
 from typing import Optional, Dict
@@ -50,8 +51,19 @@ class FQNBuilder:
             del self.mapping[connection_id]
 
     def get_server_name(self, connection_id: str) -> str:
-        """Получает имя сервера для connection ID."""
-        return self.mapping.get(connection_id, connection_id)
+        """Получает имя сервера для connection ID с поддержкой wildcard."""
+        # 1. Сначала точное совпадение (быстрее и приоритетнее)
+        if connection_id in self.mapping:
+            return self.mapping[connection_id]
+
+        # 2. Проверяем wildcard-паттерны (* и ?)
+        for pattern, server_name in self.mapping.items():
+            if '*' in pattern or '?' in pattern:
+                if fnmatch.fnmatch(connection_id, pattern):
+                    return server_name
+
+        # 3. Passthrough если ничего не найдено
+        return connection_id
 
     def build_fqn(self, connection_id: str, schema: str, table: str) -> str:
         """

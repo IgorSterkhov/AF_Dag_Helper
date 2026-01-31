@@ -347,31 +347,51 @@ def format_report(dag_path: str, results: List[ComparisonResult], mappings: Dict
             lines.append(f"[OK] {result.task_id}")
         else:
             lines.append(f"[!!] {result.task_id} - РАСХОЖДЕНИЯ:")
+            lines.append("")
 
-            if result.missing_inlets:
-                lines.append("    Inlets отсутствуют в генерации (есть в DAG):")
-                for e in sorted(result.missing_inlets, key=lambda x: x.fqn):
-                    lines.append(f"      - {e.entity_type}: {e.fqn}")
+            # СУЩЕСТВУЮЩИЙ (в DAG)
+            lines.append("    СУЩЕСТВУЮЩИЙ (в DAG):")
+            lines.append("      inlets:")
+            if result.existing_inlets:
+                for e in sorted(result.existing_inlets, key=lambda x: x.fqn):
+                    marker = "  ← отсутствует в генерации" if e in result.missing_inlets else ""
+                    lines.append(f"        {e.entity_type}: {e.fqn}{marker}")
+            else:
+                lines.append("        (пусто)")
 
-            if result.extra_inlets:
-                lines.append("    Inlets лишние в генерации (нет в DAG):")
-                for e in sorted(result.extra_inlets, key=lambda x: x.fqn):
-                    lines.append(f"      + {e.entity_type}: {e.fqn}")
+            lines.append("      outlets:")
+            if result.existing_outlets:
+                for e in sorted(result.existing_outlets, key=lambda x: x.fqn):
+                    marker = "  ← отсутствует в генерации" if e in result.missing_outlets else ""
+                    lines.append(f"        {e.entity_type}: {e.fqn}{marker}")
+            else:
+                lines.append("        (пусто)")
 
-            if result.missing_outlets:
-                lines.append("    Outlets отсутствуют в генерации:")
-                for e in sorted(result.missing_outlets, key=lambda x: x.fqn):
-                    lines.append(f"      - {e.entity_type}: {e.fqn}")
+            lines.append("")
 
-            if result.extra_outlets:
-                lines.append("    Outlets лишние в генерации:")
-                for e in sorted(result.extra_outlets, key=lambda x: x.fqn):
-                    lines.append(f"      + {e.entity_type}: {e.fqn}")
+            # СГЕНЕРИРОВАННЫЙ
+            lines.append("    СГЕНЕРИРОВАННЫЙ:")
+            lines.append("      inlets:")
+            if result.generated_inlets:
+                for e in sorted(result.generated_inlets, key=lambda x: x.fqn):
+                    marker = "  ← лишний (нет в DAG)" if e in result.extra_inlets else ""
+                    lines.append(f"        {e.entity_type}: {e.fqn}{marker}")
+            else:
+                lines.append("        (пусто)")
 
-            # Задача есть в DAG но не сгенерирована
+            lines.append("      outlets:")
+            if result.generated_outlets:
+                for e in sorted(result.generated_outlets, key=lambda x: x.fqn):
+                    marker = "  ← лишний (нет в DAG)" if e in result.extra_outlets else ""
+                    lines.append(f"        {e.entity_type}: {e.fqn}{marker}")
+            else:
+                lines.append("        (пусто)")
+
+            # Специальный случай: задача не обработана
             if not result.generated_inlets and not result.generated_outlets:
                 if result.existing_inlets or result.existing_outlets:
-                    lines.append("    [!] Задача не обработана утилитой (нет SQL или уже есть OMEntity)")
+                    lines.append("")
+                    lines.append("    [!] Задача не обработана утилитой (нет SQL или API)")
 
         lines.append("")
 
@@ -556,7 +576,7 @@ def test_all_samples(samples_dir: str = "Dags samples", mapping_file: Optional[s
     if not samples_path.exists():
         return f"Папка {samples_dir} не найдена"
 
-    dag_files = list(samples_path.glob("*.py"))
+    dag_files = list(samples_path.glob("**/*.py"))
     if not dag_files:
         return f"В папке {samples_dir} нет .py файлов"
 

@@ -16,7 +16,9 @@
       "Bash(\"c:/DevWB/AF Dags Helper/venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''c:/DevWB/AF Dags Helper''\\); from tools.file_finder import app; print\\(''Import OK''\\)\")",
       "Bash(where:*)",
       "Bash(powershell -Command \"Get-ChildItem ''c:\\\\DevWB\\\\AF Dags Helper\\\\*.py''\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(py:*)",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\":*)"
     ]
   }
 }
