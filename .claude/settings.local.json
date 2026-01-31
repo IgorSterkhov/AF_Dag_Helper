@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(dir:*)",
+      "Bash(pip install:*)",
+      "Bash(pip list:*)",
+      "Bash(python -m venv:*)",
+      "Bash(python -c:*)",
+      "Bash(python main.py:*)",
+      "Bash(python gui/app.py:*)",
+      "Bash(pytest:*)",
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(\"c:/DevWB/AF Dags Helper/venv/Scripts/python.exe\" -c \"print\\(''hello''\\)\")",
+      "Bash(\"c:/DevWB/AF Dags Helper/venv/Scripts/python.exe\" -m py_compile \"c:/DevWB/AF Dags Helper/tools/file_finder/app.py\")",
+      "Bash(\"c:/DevWB/AF Dags Helper/venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''c:/DevWB/AF Dags Helper''\\); from tools.file_finder import app; print\\(''Import OK''\\)\")",
+      "Bash(where:*)",
+      "Bash(powershell -Command \"Get-ChildItem ''c:\\\\DevWB\\\\AF Dags Helper\\\\*.py''\")",
+      "Bash(powershell -Command:*)"
+    ]
+  }
+}

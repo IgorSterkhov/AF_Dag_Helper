@@ -1,0 +1,127 @@
+"""Модели данных для анализатора DAG."""
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict
+from enum import Enum
+
+
+class EntityType(Enum):
+    """Тип сущности для OMEntity."""
+    TABLE = "TABLE"
+    API = "API"
+
+
+class TableSource(Enum):
+    """Источник ссылки на таблицу в SQL."""
+    FROM = "FROM"
+    JOIN = "JOIN"
+    INSERT = "INSERT"
+    DICTGET = "DICTGET"
+    SUBQUERY = "SUBQUERY"
+
+
+@dataclass
+class TableReference:
+    """Ссылка на таблицу, извлечённая из SQL."""
+    schema: str
+    table: str
+    source: TableSource
+    is_remote: bool = False
+    remote_prefix: Optional[str] = None
+
+    @property
+    def full_name(self) -> str:
+        """Возвращает полное имя таблицы: schema.table"""
+        return f"{self.schema}.{self.table}"
+
+    def __hash__(self):
+        return hash((self.schema, self.table, self.is_remote, self.remote_prefix))
+
+    def __eq__(self, other):
+        if not isinstance(other, TableReference):
+            return False
+        return (self.schema == other.schema and
+                self.table == other.table and
+                self.is_remote == other.is_remote and
+                self.remote_prefix == other.remote_prefix)
+
+
+@dataclass
+class SQLAnalysisResult:
+    """Результат анализа SQL запроса."""
+    inlets: List[TableReference] = field(default_factory=list)
+    outlets: List[TableReference] = field(default_factory=list)
+    dictionaries: List[TableReference] = field(default_factory=list)
+    remote_tables: List[TableReference] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    def merge(self, other: 'SQLAnalysisResult') -> 'SQLAnalysisResult':
+        """Объединяет два результата анализа."""
+        return SQLAnalysisResult(
+            inlets=list(set(self.inlets + other.inlets)),
+            outlets=list(set(self.outlets + other.outlets)),
+            dictionaries=list(set(self.dictionaries + other.dictionaries)),
+            remote_tables=list(set(self.remote_tables + other.remote_tables)),
+            warnings=self.warnings + other.warnings
+        )
+
+
+@dataclass
+class CrossServerCall:
+    """Кросс-серверная операция copy_ch_to_ch_pipe."""
+    take_data_var: str      # SQL переменная для SELECT
+    insert_data_var: str    # SQL переменная для INSERT
+    src_connection: str     # Connection для source
+    dst_connection: str     # Connection для destination
+
+
+@dataclass
+class FunctionInfo:
+    """Информация о Python функции в DAG."""
+    name: str
+    decorators: List[str] = field(default_factory=list)
+    connection_id: Optional[str] = None
+    connection_alias: Optional[str] = None
+    sql_variables: List[str] = field(default_factory=list)
+    api_connections: List[str] = field(default_factory=list)
+    cross_server_calls: List[CrossServerCall] = field(default_factory=list)
+    line_number: int = 0
+
+
+@dataclass
+class TaskInfo:
+    """Информация о задаче (PythonOperator)."""
+    task_id: str
+    python_callable: Optional[str] = None
+    existing_inlets: List[str] = field(default_factory=list)
+    existing_outlets: List[str] = field(default_factory=list)
+    op_kwargs_api: List[str] = field(default_factory=list)  # API connections из op_kwargs
+    op_kwargs_dst_table: Optional[str] = None  # Целевая таблица из op_kwargs
+    line_number: int = 0
+    has_omentity: bool = False
+
+
+@dataclass
+class DAGParseResult:
+    """Результат парсинга DAG файла."""
+    dag_id: Optional[str] = None
+    tasks: List[TaskInfo] = field(default_factory=list)
+    functions: Dict[str, FunctionInfo] = field(default_factory=dict)
+    sql_variables: Dict[str, str] = field(default_factory=dict)
+    connection_variables: Dict[str, str] = field(default_factory=dict)
+    string_variables: Dict[str, str] = field(default_factory=dict)  # Все строковые переменные
+    imports: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class OMEntityOutput:
+    """Сгенерированный OMEntity для задачи."""
+    task_id: str
+    function_name: str
+    connection_id: str
+    connection_source: str
+    inlets: List[tuple]  # (EntityType, fqn)
+    outlets: List[tuple]  # (EntityType, fqn)
+    warnings: List[str]
+    generated_code: str

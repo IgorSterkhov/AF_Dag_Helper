@@ -1,0 +1,16 @@
+# Маппинг серверов: Airflow Connection ID -> OpenMetadata Server Name
+# Если маппинг не указан - используется connection ID как есть (passthrough)
+#
+# Примеры:
+#   do-ch3: clickhouse-prod-3
+#   do-ch13: dm13
+#   do-lake-m: lake-main
+#   remote_ch: remote-clickhouse
+
+server_mapping:
+  do-ch-deliverytime: do-ch13
+
+# Поведение по умолчанию при отсутствии маппинга:
+# - passthrough: использовать connection_id как server name
+# - error: выдавать ошибку если нет маппинга (не реализовано)
+default_behavior: passthrough
