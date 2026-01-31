@@ -33,7 +33,8 @@ The data flow follows this pipeline:
 DAG file (.py)
     ↓
 DAGParser (Python AST)
-    ↓ extracts: tasks, functions, SQL variables, decorators, connection IDs
+    ↓ extracts: tasks, functions, SQL variables, decorators, connection IDs,
+    ↓           HttpHook calls (API inlets), bulk_dump calls (table outlets)
 SQLAnalyzer (sqlglot)
     ↓ extracts: FROM/JOIN tables → inlets, INSERT INTO → outlets, dictGet → dictionaries
 ConnectionResolver
@@ -41,7 +42,7 @@ ConnectionResolver
 FQNBuilder
     ↓ applies: server_mapping.yaml (connection_id → server_name)
 OMEntityGenerator
-    ↓ outputs: formatted Python code with inlets/outlets
+    ↓ outputs: formatted Python code with inlets/outlets (TABLE and API entities)
 ```
 
 **Key classes:**
@@ -95,6 +96,40 @@ dictGetOrNull('dict.product_cards_nm', 'subject_id', nm_id)
 **Remote tables (different connection):**
 - Tables with `remote_*` schema prefix are flagged as remote connections
 
+**API calls with HttpHook (treated as API inlets):**
+```python
+API_CONNECTION_ID = 'api-wh-px-partner-sc'
+
+@with_db(CH3_CONN_ID, 'ch3')
+def update_links(ch3_hook):
+    hook = HttpHook(http_conn_id=API_CONNECTION_ID, method='GET')
+    response = hook.run('api/ref_links/...')
+    ch3_hook.bulk_dump(table='dict_office.supplier_office_links', ...)
+```
+Generated output:
+```python
+inlets=[OMEntity(entity=Entity.API, fqn="api-wh-px-partner-sc")]
+outlets=[OMEntity(entity=Entity.TABLE, fqn="do-ch3.dict_office.supplier_office_links")]
+```
+
+**API via op_kwargs (parameter resolution):**
+```python
+@with_db(CH3_CONN_ID)
+def get_hr_api_data(hook, api_conn, dst_table, ...):
+    api_hook = HttpHook(http_conn_id=api_conn, ...)
+    hook.bulk_dump(table=dst_table, ...)
+
+task = PythonOperator(
+    op_kwargs=dict(
+        api_conn=API_WB_DEPARTMENTS_CONN,
+        dst_table=API_WB_DEPARTMENTS_DST_TABLE),
+    ...)
+```
+
+**bulk_dump calls (treated as table outlets):**
+- Direct: `hook.bulk_dump(table='schema.table', ...)` → outlet
+- Via parameter: resolved from op_kwargs → string_variables
+
 ## Server Mapping
 
 `config/server_mapping.yaml` maps Airflow connection IDs to OpenMetadata server names:
@@ -129,10 +164,10 @@ python test_against_samples.py "Dags samples/api_ch3_hr_erp_updates.py"
 4. Предлагает обновления для `server_mapping.yaml`
 
 **Типичные причины расхождений:**
-- API inlets (`Entity.API`) - утилита не детектит API, только SQL
-- Таблицы вне SQL переменных (динамический SQL, op_kwargs)
+- Таблицы вне SQL переменных (динамический SQL, сложные op_kwargs)
 - Несовпадение серверов - нужен маппинг в `server_mapping.yaml`
 - Задача уже имеет OMEntity - утилита пропускает такие задачи
+- SQL синтаксис не поддерживается sqlglot (ALTER, OPTIMIZE и т.д.)
 
 ## Dependencies
 

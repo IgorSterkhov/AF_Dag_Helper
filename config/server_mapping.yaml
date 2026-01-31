@@ -18,3 +18,5 @@ server_mapping:
 # - passthrough: использовать connection_id как server name
 # - error: выдавать ошибку если нет маппинга (не реализовано)
 default_behavior: passthrough
+
+strip_d_suffix: true

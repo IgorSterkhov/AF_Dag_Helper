@@ -31,6 +31,22 @@ from generator.fqn_builder import FQNBuilder
 from generator.omentity_generator import OMEntityGenerator
 
 
+def normalize_fqn(fqn: str) -> str:
+    """
+    Нормализует FQN для сравнения.
+    Удаляет суффикс _d из имени таблицы.
+
+    Пример: do-ch6.buffer.na_boxes_shk_d -> do-ch6.buffer.na_boxes_shk
+    """
+    parts = fqn.rsplit('.', 1)  # Разделяем на prefix и table
+    if len(parts) == 2:
+        prefix, table = parts
+        if table.endswith('_d'):
+            table = table[:-2]
+        return f"{prefix}.{table}"
+    return fqn
+
+
 @dataclass
 class OMEntityInfo:
     """Информация об одном OMEntity."""
@@ -38,12 +54,13 @@ class OMEntityInfo:
     fqn: str
 
     def __hash__(self):
-        return hash((self.entity_type, self.fqn))
+        return hash((self.entity_type, normalize_fqn(self.fqn)))
 
     def __eq__(self, other):
         if not isinstance(other, OMEntityInfo):
             return False
-        return self.entity_type == other.entity_type and self.fqn == other.fqn
+        return (self.entity_type == other.entity_type and
+                normalize_fqn(self.fqn) == normalize_fqn(other.fqn))
 
 
 @dataclass
@@ -476,8 +493,9 @@ def analyze_dag_force(dag_path: str, mapping_file: Optional[str] = None) -> Dict
         has_api = bool(task.op_kwargs_api) or (func_info and func_info.api_connections)
         has_dst_table = bool(task.op_kwargs_dst_table)
         has_cross_server = func_info and func_info.cross_server_calls
+        has_bulk_dump = func_info and func_info.bulk_dump_tables
 
-        if not sql_result and not has_api and not has_dst_table and not has_cross_server:
+        if not sql_result and not has_api and not has_dst_table and not has_cross_server and not has_bulk_dump:
             continue
 
         # Генерируем OMEntity
@@ -518,13 +536,44 @@ def analyze_dag_force(dag_path: str, mapping_file: Optional[str] = None) -> Dict
                 fqn = fqn_builder.build_fqn(conn_id, schema, table)
                 task_omentity.outlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))
 
+        # bulk_dump tables из функции как outlet
+        if func_info and func_info.bulk_dump_tables:
+            for table_type, table_value in func_info.bulk_dump_tables:
+                resolved_table = None
+
+                if table_type == 'param':
+                    # Это параметр функции - резолвим из op_kwargs
+                    if task.op_kwargs_all and table_value in task.op_kwargs_all:
+                        kwarg_value = task.op_kwargs_all[table_value]
+                        # Резолвим переменную из string_variables
+                        if kwarg_value in dag_result.string_variables:
+                            resolved_table = dag_result.string_variables[kwarg_value]
+                        else:
+                            resolved_table = kwarg_value
+                else:
+                    # Это literal или переменная в scope функции
+                    if table_value in dag_result.string_variables:
+                        resolved_table = dag_result.string_variables[table_value]
+                    elif '.' in table_value:
+                        # Уже schema.table
+                        resolved_table = table_value
+
+                if resolved_table and '.' in resolved_table:
+                    parts = resolved_table.split('.', 1)
+                    schema = parts[0]
+                    table = parts[1] if len(parts) > 1 else ''
+                    fqn = fqn_builder.build_fqn(conn_id, schema, table)
+                    outlet = OMEntityInfo(entity_type="TABLE", fqn=fqn)
+                    if outlet not in task_omentity.outlets:
+                        task_omentity.outlets.append(outlet)
+
         # Обрабатываем SQL результаты если есть
         if sql_result:
             # Inlets
             for table_ref in sql_result.inlets:
                 if table_ref.is_remote:
                     fqn = fqn_builder.build_fqn_for_remote(
-                        table_ref.remote_prefix, table_ref.schema, table_ref.table)
+                        conn_id, table_ref.remote_prefix, table_ref.table)
                 else:
                     fqn = fqn_builder.build_fqn(conn_id, table_ref.schema, table_ref.table)
                 task_omentity.inlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))

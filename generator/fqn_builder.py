@@ -12,6 +12,7 @@ class FQNBuilder:
     def __init__(self, mapping_file: Optional[str] = None):
         self.mapping: Dict[str, str] = {}
         self.default_behavior = "passthrough"
+        self.strip_d_suffix = True  # Удалять суффикс _d из таблиц
 
         if mapping_file:
             self.load_mapping(mapping_file)
@@ -25,6 +26,7 @@ class FQNBuilder:
                     config = yaml.safe_load(f) or {}
                     self.mapping = config.get('server_mapping', {}) or {}
                     self.default_behavior = config.get('default_behavior', 'passthrough')
+                    self.strip_d_suffix = config.get('strip_d_suffix', True)
             except Exception:
                 pass
 
@@ -50,6 +52,12 @@ class FQNBuilder:
         if connection_id in self.mapping:
             del self.mapping[connection_id]
 
+    def normalize_table_name(self, table: str) -> str:
+        """Удаляет суффикс _d из имени таблицы если включено."""
+        if self.strip_d_suffix and table.endswith('_d'):
+            return table[:-2]
+        return table
+
     def get_server_name(self, connection_id: str) -> str:
         """Получает имя сервера для connection ID с поддержкой wildcard."""
         # 1. Сначала точное совпадение (быстрее и приоритетнее)
@@ -73,18 +81,16 @@ class FQNBuilder:
         Иначе passthrough: connection_id.schema.table
         """
         server = self.get_server_name(connection_id)
-        return f"{server}.{schema}.{table}"
+        normalized_table = self.normalize_table_name(table)
+        return f"{server}.{schema}.{normalized_table}"
 
-    def build_fqn_for_remote(self, remote_prefix: str, schema: str, table: str) -> str:
+    def build_fqn_for_remote(self, connection_id: str, remote_prefix: str, table: str) -> str:
         """
         Строит FQN для remote_* таблиц.
 
-        Для remote таблиц схема обычно уже включена в prefix.
-        Например: remote_ch.last_srid_position_v3 -> remote_ch.positions.last_srid_position_v3
-        Или если schema=remote_ch, table=last_srid_position_v3 -> remote_ch.last_srid_position_v3
+        Формат: server.remote_prefix.table
+        Пример: do-ch13.remote_ch.oof_position_status_v3_rc
         """
-        server = self.get_server_name(remote_prefix)
-        # Для remote таблиц schema часто совпадает с remote_prefix
-        if schema == remote_prefix:
-            return f"{server}.{table}"
-        return f"{server}.{schema}.{table}"
+        server = self.get_server_name(connection_id)
+        normalized_table = self.normalize_table_name(table)
+        return f"{server}.{remote_prefix}.{normalized_table}"

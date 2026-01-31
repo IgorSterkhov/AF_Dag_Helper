@@ -136,6 +136,37 @@ class OMEntityGenerator:
                 fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
                 outlets.append((EntityType.TABLE, fqn))
 
+        # Обрабатываем bulk_dump tables из функции
+        if func_info and func_info.bulk_dump_tables and dag_result:
+            for table_type, table_value in func_info.bulk_dump_tables:
+                resolved_table = None
+
+                if table_type == 'param':
+                    # Это параметр функции - резолвим из op_kwargs
+                    if task.op_kwargs_all and table_value in task.op_kwargs_all:
+                        kwarg_value = task.op_kwargs_all[table_value]
+                        # Резолвим переменную из string_variables
+                        if kwarg_value in dag_result.string_variables:
+                            resolved_table = dag_result.string_variables[kwarg_value]
+                        else:
+                            resolved_table = kwarg_value
+                else:
+                    # Это literal или переменная в scope функции
+                    if table_value in dag_result.string_variables:
+                        resolved_table = dag_result.string_variables[table_value]
+                    elif '.' in table_value:
+                        # Уже schema.table
+                        resolved_table = table_value
+
+                if resolved_table and '.' in resolved_table:
+                    parts = resolved_table.split('.', 1)
+                    schema = parts[0]
+                    table = parts[1] if len(parts) > 1 else ''
+                    fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+                    outlet_tuple = (EntityType.TABLE, fqn)
+                    if outlet_tuple not in outlets:
+                        outlets.append(outlet_tuple)
+
         # Обрабатываем cross-server вызовы
         if func_info and func_info.cross_server_calls and dag_result:
             for call in func_info.cross_server_calls:
@@ -155,7 +186,7 @@ class OMEntityGenerator:
                     for table_ref in take_result.inlets:
                         if table_ref.is_remote:
                             fqn = self.fqn_builder.build_fqn_for_remote(
-                                table_ref.remote_prefix, table_ref.schema, table_ref.table
+                                src_conn, table_ref.remote_prefix, table_ref.table
                             )
                         else:
                             fqn = self.fqn_builder.build_fqn(src_conn, table_ref.schema, table_ref.table)
@@ -177,9 +208,7 @@ class OMEntityGenerator:
         for table_ref in sql_result.inlets:
             if table_ref.is_remote:
                 fqn = self.fqn_builder.build_fqn_for_remote(
-                    table_ref.remote_prefix,
-                    table_ref.schema,
-                    table_ref.table
+                    connection_id, table_ref.remote_prefix, table_ref.table
                 )
                 warnings.append(
                     f'"{table_ref.full_name}" uses prefix "{table_ref.remote_prefix}" - different connection?'
@@ -204,9 +233,7 @@ class OMEntityGenerator:
         # Обрабатываем remote таблицы (если ещё не добавлены через inlets)
         for table_ref in sql_result.remote_tables:
             fqn = self.fqn_builder.build_fqn_for_remote(
-                table_ref.remote_prefix,
-                table_ref.schema,
-                table_ref.table
+                connection_id, table_ref.remote_prefix, table_ref.table
             )
             inlet_tuple = (EntityType.TABLE, fqn)
             if inlet_tuple not in inlets:

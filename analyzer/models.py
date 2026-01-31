@@ -84,6 +84,7 @@ class FunctionInfo:
     connection_alias: Optional[str] = None
     sql_variables: List[str] = field(default_factory=list)
     api_connections: List[str] = field(default_factory=list)
+    bulk_dump_tables: List[tuple] = field(default_factory=list)  # [('value'|'param', table_name), ...]
     cross_server_calls: List[CrossServerCall] = field(default_factory=list)
     line_number: int = 0
 
@@ -97,6 +98,7 @@ class TaskInfo:
     existing_outlets: List[str] = field(default_factory=list)
     op_kwargs_api: List[str] = field(default_factory=list)  # API connections из op_kwargs
     op_kwargs_dst_table: Optional[str] = None  # Целевая таблица из op_kwargs
+    op_kwargs_all: Dict[str, str] = field(default_factory=dict)  # Все op_kwargs для резолвинга
     line_number: int = 0
     has_omentity: bool = False
 

@@ -56,6 +56,12 @@ class SQLAnalyzer:
                 continue
             self._analyze_statement(statement, result)
 
+        # Дополнительно парсим ALTER TABLE через regex (sqlglot не поддерживает ATTACH/REPLACE PARTITION)
+        self._extract_alter_table_partitions(sql, result)
+
+        # Дополнительно парсим OPTIMIZE TABLE через regex
+        self._extract_optimize_table(sql, result)
+
         # Удаляем временные таблицы из результатов
         result.inlets = [t for t in result.inlets if t.full_name not in self._temp_tables]
         result.outlets = [t for t in result.outlets if t.full_name not in self._temp_tables]
@@ -176,6 +182,56 @@ class SQLAnalyzer:
                         table_ref = self._parse_dict_name(dict_name)
                         if table_ref:
                             result.dictionaries.append(table_ref)
+
+    def _extract_alter_table_partitions(self, sql: str, result: SQLAnalysisResult):
+        """Извлекает таблицы из ALTER TABLE ATTACH/REPLACE PARTITION через regex.
+
+        sqlglot не поддерживает ATTACH/REPLACE PARTITION для ClickHouse,
+        поэтому используем regex для извлечения таблиц.
+        """
+        # Паттерн: ALTER TABLE schema.table ATTACH|REPLACE PARTITION ... FROM schema.table
+        alter_pattern = r'ALTER\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)\s+(?:ATTACH|REPLACE)\s+PARTITION\s+.*?FROM\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+
+        for match in re.finditer(alter_pattern, sql, re.IGNORECASE | re.DOTALL):
+            target_full = match.group(1)  # -> outlet
+            source_full = match.group(2)  # -> inlet
+
+            target_parts = target_full.split('.')
+            source_parts = source_full.split('.')
+
+            if len(target_parts) == 2:
+                result.outlets.append(TableReference(
+                    schema=target_parts[0],
+                    table=target_parts[1],
+                    source=TableSource.INSERT
+                ))
+
+            if len(source_parts) == 2:
+                is_remote = source_parts[0].startswith('remote_')
+                ref = TableReference(
+                    schema=source_parts[0],
+                    table=source_parts[1],
+                    source=TableSource.FROM,
+                    is_remote=is_remote,
+                    remote_prefix=source_parts[0] if is_remote else None
+                )
+                if is_remote:
+                    result.remote_tables.append(ref)
+                result.inlets.append(ref)
+
+    def _extract_optimize_table(self, sql: str, result: SQLAnalysisResult):
+        """Извлекает таблицы из OPTIMIZE TABLE через regex."""
+        # Паттерн: OPTIMIZE TABLE schema.table [PARTITION ...] [FINAL]
+        optimize_pattern = r'OPTIMIZE\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+        for match in re.finditer(optimize_pattern, sql, re.IGNORECASE):
+            full_name = match.group(1)
+            parts = full_name.split('.')
+            if len(parts) == 2:
+                result.outlets.append(TableReference(
+                    schema=parts[0],
+                    table=parts[1],
+                    source=TableSource.INSERT
+                ))
 
     def _is_cte_reference(self, table: exp.Table, root: exp.Expression) -> bool:
         """Проверяет, является ли таблица ссылкой на CTE."""
@@ -308,6 +364,47 @@ class SQLAnalyzer:
                     source=TableSource.DICTGET
                 )
                 result.dictionaries.append(ref)
+
+        # Паттерн для ALTER TABLE ATTACH/REPLACE PARTITION ... FROM
+        alter_pattern = r'ALTER\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)\s+(?:ATTACH|REPLACE)\s+PARTITION\s+.*?FROM\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+        for match in re.finditer(alter_pattern, sql, re.IGNORECASE | re.DOTALL):
+            target_full = match.group(1)  # -> outlet
+            source_full = match.group(2)  # -> inlet
+
+            target_parts = target_full.split('.')
+            source_parts = source_full.split('.')
+
+            if len(target_parts) == 2:
+                result.outlets.append(TableReference(
+                    schema=target_parts[0],
+                    table=target_parts[1],
+                    source=TableSource.INSERT
+                ))
+
+            if len(source_parts) == 2:
+                is_remote = source_parts[0].startswith('remote_')
+                ref = TableReference(
+                    schema=source_parts[0],
+                    table=source_parts[1],
+                    source=TableSource.FROM,
+                    is_remote=is_remote,
+                    remote_prefix=source_parts[0] if is_remote else None
+                )
+                if is_remote:
+                    result.remote_tables.append(ref)
+                result.inlets.append(ref)
+
+        # Паттерн для OPTIMIZE TABLE
+        optimize_pattern = r'OPTIMIZE\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+        for match in re.finditer(optimize_pattern, sql, re.IGNORECASE):
+            full_name = match.group(1)
+            parts = full_name.split('.')
+            if len(parts) == 2:
+                result.outlets.append(TableReference(
+                    schema=parts[0],
+                    table=parts[1],
+                    source=TableSource.INSERT
+                ))
 
         # Убираем дубликаты
         result.inlets = list(set(result.inlets))

@@ -47,8 +47,9 @@ class DAGParser:
         # Связываем функции с SQL переменными через AST
         self._link_functions_to_sql(tree)
 
-        # Извлекаем API connections и cross-server вызовы
+        # Извлекаем API connections, bulk_dump tables и cross-server вызовы
         self._extract_api_usage(tree)
+        self._extract_bulk_dump_tables(tree)
         self._extract_cross_server_calls(tree)
 
         return self.result
@@ -71,8 +72,10 @@ class DAGParser:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         var_name = target.id
-                        # Проверяем паттерн *_CONN_ID или *_CONN
-                        if var_name.endswith('_CONN_ID') or var_name.endswith('_CONN'):
+                        # Проверяем паттерн *_CONN_ID, *_CONNECTION_ID или *_CONN
+                        if (var_name.endswith('_CONN_ID') or
+                            var_name.endswith('_CONNECTION_ID') or
+                            var_name.endswith('_CONN')):
                             if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
                                 self.result.connection_variables[var_name] = node.value.value
 
@@ -194,17 +197,19 @@ class DAGParser:
             return
 
         for keyword in node.keywords:
-            # API connection (api_conn, api_connection, http_conn и т.д.)
-            if keyword.arg and ('api' in keyword.arg.lower() or 'conn' in keyword.arg.lower()):
+            if keyword.arg:
                 value = self._resolve_value(keyword.value)
                 if value:
-                    task_info.op_kwargs_api.append(value)
+                    # Сохраняем все kwargs для резолвинга параметров функции
+                    task_info.op_kwargs_all[keyword.arg] = value
 
-            # Целевая таблица (dst_table, table, target_table и т.д.)
-            if keyword.arg and ('table' in keyword.arg.lower() or 'dst' in keyword.arg.lower()):
-                value = self._resolve_value(keyword.value)
-                if value:
-                    task_info.op_kwargs_dst_table = value
+                    # API connection (api_conn, api_connection, http_conn и т.д.)
+                    if 'api' in keyword.arg.lower() or 'conn' in keyword.arg.lower():
+                        task_info.op_kwargs_api.append(value)
+
+                    # Целевая таблица (dst_table, table, target_table и т.д.)
+                    if 'table' in keyword.arg.lower() or 'dst' in keyword.arg.lower():
+                        task_info.op_kwargs_dst_table = value
 
     def _extract_omentity_fqns(self, node: ast.expr) -> List[str]:
         """Извлекает FQN из списка OMEntity."""
@@ -362,6 +367,45 @@ class DAGParser:
                                     api_connections.append(conn)
 
             func_info.api_connections = api_connections
+
+    def _extract_bulk_dump_tables(self, tree: ast.Module):
+        """Извлекает bulk_dump(table=...) вызовы из функций."""
+        # Собираем AST ноды функций
+        func_nodes: Dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                func_nodes[node.name] = node
+
+        for func_name, func_info in self.result.functions.items():
+            if func_name not in func_nodes:
+                continue
+
+            func_node = func_nodes[func_name]
+            bulk_dump_tables = []
+
+            # Получаем имена параметров функции чтобы распознать их
+            func_params = set()
+            for arg in func_node.args.args:
+                func_params.add(arg.arg)
+            for arg in func_node.args.kwonlyargs:
+                func_params.add(arg.arg)
+
+            for node in ast.walk(func_node):
+                if isinstance(node, ast.Call):
+                    # Проверяем на *.bulk_dump(...)
+                    if isinstance(node.func, ast.Attribute) and node.func.attr == 'bulk_dump':
+                        # Ищем table= в keyword аргументах
+                        for kw in node.keywords:
+                            if kw.arg == 'table':
+                                table_value = self._resolve_value(kw.value)
+                                if table_value:
+                                    # Помечаем если это параметр функции (резолвится из op_kwargs)
+                                    if table_value in func_params:
+                                        bulk_dump_tables.append(('param', table_value))
+                                    else:
+                                        bulk_dump_tables.append(('value', table_value))
+
+            func_info.bulk_dump_tables = bulk_dump_tables
 
     def _extract_cross_server_calls(self, tree: ast.Module):
         """Извлекает copy_ch_to_ch_pipe вызовы из функций."""
