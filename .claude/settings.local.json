@@ -18,7 +18,11 @@
       "Bash(powershell -Command \"Get-ChildItem ''c:\\\\DevWB\\\\AF Dags Helper\\\\*.py''\")",
       "Bash(powershell -Command:*)",
       "Bash(py:*)",
-      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\":*)"
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\":*)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" -c \"\nfrom generator.omentity_generator import OMEntityGenerator\nfrom generator.fqn_builder import FQNBuilder\nimport inspect\n\n# Check the __init__ signature\nsig = inspect.signature\\(OMEntityGenerator.__init__\\)\nprint\\(''Signature:'', sig\\)\n\n# Check the default\nfqn = FQNBuilder\\(\\)\ngen = OMEntityGenerator\\(fqn\\)\nprint\\(''include_dictget_as_inlets:'', gen.include_dictget_as_inlets\\)\n\")",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" -c:*)",
+      "Bash(git push:*)"
     ]
   }
 }

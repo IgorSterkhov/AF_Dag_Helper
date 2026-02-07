@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\":*)",
-      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\DevWB\\\\AF Dags Helper\\\\test_against_samples.py\")"
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\DevWB\\\\AF Dags Helper\\\\test_against_samples.py\")",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" -c \"import sys; sys.path.insert\\(0, r''c:\\\\DevWB\\\\AF Dags Helper''\\); from test_against_samples import extract_existing_omentity; print\\(''Import OK''\\)\")",
+      "Bash(\"c:\\\\DevWB\\\\AF Dags Helper\\\\venv\\\\Scripts\\\\python.exe\" -c \"import sys; sys.path.insert\\(0, r''c:\\\\DevWB\\\\AF Dags Helper''\\); import py_compile; py_compile.compile\\(r''c:\\\\DevWB\\\\AF Dags Helper\\\\gui\\\\app.py'', doraise=True\\); print\\(''Syntax OK''\\)\")"
     ]
   }
 }
