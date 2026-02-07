@@ -1,0 +1,36 @@
+# Известные ошибки в эталонных DAG файлах
+# Используется для коррекции FQN при сравнении с генерацией
+#
+# Формат:
+#   exact: точные замены (неправильный FQN -> правильный или null для игнорирования)
+#   patterns: regex паттерны для автокоррекции
+
+reference_corrections:
+  # Точные коррекции
+  exact:
+    # Лишняя схема в FQN (4 части вместо 3)
+    "do-ch13.positions.buffer.delay_history": "do-ch13.buffer.delay_history"
+    "do-ch13.datamart.core_wh.delay_srid_tracker": "do-ch13.core_wh.delay_srid_tracker"
+    "do-ch13.datamart.positions.delay_position_v3": "do-ch13.positions.delay_position_v3"
+    "do-ch13.positions.buffer.delay_history": "do-ch13.buffer.delay_history"
+    # Пример: игнорировать FQN при сравнении (null)
+    # "do-ch13.some.manual.fqn": null
+
+  # ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ:
+  # - ch_dm0_na_boxes/srid_tracker: dict.branch_office и dict.action_list_srid
+  #   включены как inlets в эталоне (dictGet), но генератор не включает dictGet
+  #   таблицы по умолчанию (include_dictget_as_inlets=False).
+  #   Это непоследовательность в самом эталонном DAG: другие задачи с dictGet
+  #   (shipping, calculations) НЕ включают словарные инлеты.
+
+  # Паттерны для автокоррекции (regex)
+  patterns:
+    # Пример: убрать "datamart." после сервера
+    # - pattern: "^([^.]+)\\.datamart\\.(.+)$"
+    #   replacement: "\\1.\\2"
+
+settings:
+  # Включить/выключить коррекции
+  enabled: true
+  # Выводить информацию о применённых коррекциях
+  verbose: true

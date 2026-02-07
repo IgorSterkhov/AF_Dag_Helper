@@ -8,6 +8,7 @@ from analyzer.sql_analyzer import SQLAnalyzer
 from analyzer.models import SQLAnalysisResult
 from generator.fqn_builder import FQNBuilder
 from generator.omentity_generator import OMEntityGenerator
+from visualizer.diagram import DataFlowDiagram
 
 
 class DAGAnalyzer:
@@ -18,6 +19,7 @@ class DAGAnalyzer:
         self.sql_analyzer = SQLAnalyzer()
         self.fqn_builder = FQNBuilder(mapping_file)
         self.generator = OMEntityGenerator(self.fqn_builder)
+        self.diagram = DataFlowDiagram()
 
     def analyze_dag(self, dag_path: str) -> str:
         """
@@ -74,6 +76,14 @@ class DAGAnalyzer:
         for output in outputs:
             lines.append(output.generated_code)
             lines.append("")
+            # Диаграмма потоков данных
+            diagram = self.diagram.render(output)
+            if diagram:
+                lines.append("# " + "-" * 65)
+                lines.append("# Data flow diagram:")
+                for dline in diagram.split("\n"):
+                    lines.append(f"# {dline}")
+                lines.append("# " + "-" * 65)
             lines.append("")
 
         return "\n".join(lines)

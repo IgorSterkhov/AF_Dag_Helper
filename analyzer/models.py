@@ -9,6 +9,7 @@ class EntityType(Enum):
     """Тип сущности для OMEntity."""
     TABLE = "TABLE"
     API = "API"
+    TOPIC = "TOPIC"
 
 
 class TableSource(Enum):
@@ -69,10 +70,12 @@ class SQLAnalysisResult:
 @dataclass
 class CrossServerCall:
     """Кросс-серверная операция copy_ch_to_ch_pipe."""
-    take_data_var: str      # SQL переменная для SELECT
-    insert_data_var: str    # SQL переменная для INSERT
-    src_connection: str     # Connection для source
-    dst_connection: str     # Connection для destination
+    take_data_var: Optional[str] = None       # SQL variable name for SELECT
+    take_data_inline: Optional[str] = None    # Inline SQL string for SELECT
+    insert_data_var: Optional[str] = None     # SQL variable name for INSERT
+    insert_data_inline: Optional[str] = None  # Inline SQL string for INSERT
+    src_connection: str = ""                   # Connection для source
+    dst_connection: str = ""                   # Connection для destination
 
 
 @dataclass
@@ -116,6 +119,31 @@ class DAGParseResult:
     warnings: List[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class OMEntityItem:
+    """Один элемент OMEntity (inlet или outlet) с опциональным key."""
+    entity_type: EntityType
+    fqn: str
+    key: Optional[str] = None
+
+    def __hash__(self):
+        return hash((self.entity_type, self.fqn))
+
+    def __eq__(self, other):
+        if not isinstance(other, OMEntityItem):
+            return False
+        return self.entity_type == other.entity_type and self.fqn == other.fqn
+
+
+@dataclass
+class DataFlowGroup:
+    """Группа потока данных (inlets -> outlets) для одного логического шага."""
+    flow_type: str  # 'api', 'sql', 'cross_server', 'bulk_dump'
+    inlets: List[OMEntityItem] = field(default_factory=list)
+    outlets: List[OMEntityItem] = field(default_factory=list)
+    source_description: str = ""
+
+
 @dataclass
 class OMEntityOutput:
     """Сгенерированный OMEntity для задачи."""
@@ -123,7 +151,7 @@ class OMEntityOutput:
     function_name: str
     connection_id: str
     connection_source: str
-    inlets: List[tuple]  # (EntityType, fqn)
-    outlets: List[tuple]  # (EntityType, fqn)
-    warnings: List[str]
-    generated_code: str
+    inlets: List[OMEntityItem] = field(default_factory=list)
+    outlets: List[OMEntityItem] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    generated_code: str = ""

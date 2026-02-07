@@ -13,9 +13,10 @@ import ast
 import io
 import re
 import sys
+import yaml
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Optional, Tuple, Pattern
 
 # UTF-8 вывод для Windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -50,8 +51,9 @@ def normalize_fqn(fqn: str) -> str:
 @dataclass
 class OMEntityInfo:
     """Информация об одном OMEntity."""
-    entity_type: str  # TABLE, API
+    entity_type: str  # TABLE, API, TOPIC
     fqn: str
+    key: Optional[str] = None
 
     def __hash__(self):
         return hash((self.entity_type, normalize_fqn(self.fqn)))
@@ -81,6 +83,13 @@ class ComparisonResult:
     # Сгенерированные утилитой
     generated_inlets: Set[OMEntityInfo] = field(default_factory=set)
     generated_outlets: Set[OMEntityInfo] = field(default_factory=set)
+    # Key-группы (информационное сравнение)
+    key_mismatches: List[Tuple[str, str, Optional[str], Optional[str]]] = field(default_factory=list)
+    # [(entity_type, fqn, existing_key, generated_key), ...]
+    # Коррекции и подозрительные FQN
+    applied_corrections: List['CorrectionInfo'] = field(default_factory=list)
+    ignored_fqns: List[str] = field(default_factory=list)
+    suspicious_fqns: List['SuspiciousFQN'] = field(default_factory=list)
 
     @property
     def missing_inlets(self) -> Set[OMEntityInfo]:
@@ -107,6 +116,140 @@ class ComparisonResult:
         """Полное совпадение."""
         return (not self.missing_inlets and not self.extra_inlets and
                 not self.missing_outlets and not self.extra_outlets)
+
+
+@dataclass
+class CorrectionInfo:
+    """Информация о применённой коррекции."""
+    original_fqn: str
+    corrected_fqn: Optional[str]  # None = игнорировать
+    correction_type: str  # 'exact', 'pattern', 'ignored'
+    pattern_used: Optional[str] = None
+
+
+@dataclass
+class SuspiciousFQN:
+    """Подозрительный FQN (возможная ошибка в reference)."""
+    fqn: str
+    reason: str
+    suggested_correction: Optional[str] = None
+
+
+@dataclass
+class ReferenceCorrections:
+    """Загруженные коррекции из конфига."""
+    exact_corrections: Dict[str, Optional[str]] = field(default_factory=dict)
+    pattern_corrections: List[Tuple[Pattern, str]] = field(default_factory=list)
+    enabled: bool = True
+    verbose: bool = True
+
+
+def load_reference_corrections(config_path: Optional[str] = None) -> ReferenceCorrections:
+    """
+    Загружает коррекции ссылок из YAML конфига.
+
+    Возвращает пустые коррекции если файл не существует (graceful degradation).
+    """
+    if config_path is None:
+        config_path = str(ROOT_DIR / "config" / "known_reference_errors.yaml")
+
+    corrections = ReferenceCorrections()
+
+    path = Path(config_path)
+    if not path.exists():
+        return corrections  # Graceful: возвращаем пустые коррекции
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+
+        ref_corrections = config.get('reference_corrections', {})
+
+        # Загружаем точные коррекции
+        corrections.exact_corrections = ref_corrections.get('exact', {}) or {}
+
+        # Компилируем паттерны
+        for pattern_info in ref_corrections.get('patterns', []) or []:
+            pattern_str = pattern_info.get('pattern', '')
+            replacement = pattern_info.get('replacement', '')
+            if pattern_str:
+                try:
+                    compiled = re.compile(pattern_str)
+                    corrections.pattern_corrections.append((compiled, replacement))
+                except re.error:
+                    pass  # Пропускаем невалидные паттерны
+
+        # Загружаем настройки
+        settings = config.get('settings', {})
+        corrections.enabled = settings.get('enabled', True)
+        corrections.verbose = settings.get('verbose', True)
+
+    except Exception:
+        pass  # Возвращаем дефолтные коррекции при любой ошибке
+
+    return corrections
+
+
+def apply_correction(
+    fqn: str,
+    corrections: ReferenceCorrections
+) -> Tuple[str, Optional[CorrectionInfo]]:
+    """
+    Применяет коррекцию к FQN.
+
+    Returns:
+        (corrected_fqn, correction_info) - correction_info = None если коррекция не применена
+        Если FQN должен быть игнорирован, возвращает (None, correction_info)
+    """
+    if not corrections.enabled:
+        return fqn, None
+
+    # 1. Проверяем точные коррекции
+    if fqn in corrections.exact_corrections:
+        corrected = corrections.exact_corrections[fqn]
+        info = CorrectionInfo(
+            original_fqn=fqn,
+            corrected_fqn=corrected,
+            correction_type='ignored' if corrected is None else 'exact'
+        )
+        return corrected, info
+
+    # 2. Пробуем паттерны
+    for pattern, replacement in corrections.pattern_corrections:
+        if pattern.match(fqn):
+            corrected = pattern.sub(replacement, fqn)
+            if corrected != fqn:
+                info = CorrectionInfo(
+                    original_fqn=fqn,
+                    corrected_fqn=corrected,
+                    correction_type='pattern',
+                    pattern_used=pattern.pattern
+                )
+                return corrected, info
+
+    return fqn, None
+
+
+def detect_suspicious_fqn(fqn: str) -> Optional[SuspiciousFQN]:
+    """
+    Определяет подозрительные FQN (возможные ошибки в reference).
+
+    Детектируемые паттерны:
+    - 4+ части (server.extra.schema.table)
+    """
+    parts = fqn.split('.')
+
+    # Проверяем 4+ части (стандарт - server.schema.table = 3 части)
+    if len(parts) >= 4:
+        # Предлагаем коррекцию - убираем вторую часть
+        suggested = f"{parts[0]}.{'.'.join(parts[2:])}"
+        return SuspiciousFQN(
+            fqn=fqn,
+            reason=f"FQN имеет {len(parts)} частей (ожидается 3: server.schema.table)",
+            suggested_correction=suggested
+        )
+
+    return None
 
 
 def extract_existing_omentity(dag_path: str) -> Dict[str, TaskOMEntity]:
@@ -178,6 +321,7 @@ def _parse_omentity_call(call: ast.Call) -> Optional[OMEntityInfo]:
     """Парсит один вызов OMEntity(...)."""
     entity_type = None
     fqn = None
+    key = None
 
     for keyword in call.keywords:
         if keyword.arg == 'entity':
@@ -192,8 +336,12 @@ def _parse_omentity_call(call: ast.Call) -> Optional[OMEntityInfo]:
                 # f-string
                 fqn = _extract_fstring_value(keyword.value)
 
+        elif keyword.arg == 'key':
+            if isinstance(keyword.value, ast.Constant):
+                key = str(keyword.value.value)
+
     if entity_type and fqn:
-        return OMEntityInfo(entity_type=entity_type, fqn=fqn)
+        return OMEntityInfo(entity_type=entity_type, fqn=fqn, key=key)
     return None
 
 
@@ -271,26 +419,33 @@ def parse_generated_omentity(generated_text: str) -> Dict[str, TaskOMEntity]:
 
 
 def _parse_omentity_line(line: str) -> Optional[OMEntityInfo]:
-    """Парсит строку вида OMEntity(entity=Entity.TABLE, fqn="...")."""
+    """Парсит строку вида OMEntity(entity=Entity.TABLE, fqn="...", key="...")."""
     # Entity type
     entity_match = re.search(r'Entity\.(\w+)', line)
     # FQN
     fqn_match = re.search(r'fqn="([^"]+)"', line)
+    # Key (optional)
+    key_match = re.search(r'key="([^"]+)"', line)
 
     if entity_match and fqn_match:
         return OMEntityInfo(
             entity_type=entity_match.group(1),
-            fqn=fqn_match.group(1)
+            fqn=fqn_match.group(1),
+            key=key_match.group(1) if key_match else None
         )
     return None
 
 
 def compare_omentity(
     existing: Dict[str, TaskOMEntity],
-    generated: Dict[str, TaskOMEntity]
+    generated: Dict[str, TaskOMEntity],
+    corrections: Optional[ReferenceCorrections] = None
 ) -> List[ComparisonResult]:
-    """Сравнивает существующие и сгенерированные OMEntity."""
+    """Сравнивает существующие и сгенерированные OMEntity с учётом коррекций."""
     results = []
+
+    if corrections is None:
+        corrections = ReferenceCorrections()
 
     # Все task_id из обоих источников
     all_task_ids = set(existing.keys()) | set(generated.keys())
@@ -299,16 +454,90 @@ def compare_omentity(
         result = ComparisonResult(task_id=task_id)
 
         if task_id in existing:
-            result.existing_inlets = set(existing[task_id].inlets)
-            result.existing_outlets = set(existing[task_id].outlets)
+            # Применяем коррекции к reference FQN (inlets)
+            for entity in existing[task_id].inlets:
+                corrected_fqn, correction_info = apply_correction(entity.fqn, corrections)
+
+                if correction_info:
+                    result.applied_corrections.append(correction_info)
+                    if corrected_fqn is None:
+                        result.ignored_fqns.append(entity.fqn)
+                        continue  # Пропускаем игнорируемые
+
+                # Детектируем подозрительные (только если нет коррекции)
+                if not correction_info:
+                    suspicious = detect_suspicious_fqn(entity.fqn)
+                    if suspicious:
+                        result.suspicious_fqns.append(suspicious)
+
+                # Создаём скорректированный entity
+                corrected_entity = OMEntityInfo(
+                    entity_type=entity.entity_type,
+                    fqn=corrected_fqn
+                )
+                result.existing_inlets.add(corrected_entity)
+
+            # Применяем коррекции к reference FQN (outlets)
+            for entity in existing[task_id].outlets:
+                corrected_fqn, correction_info = apply_correction(entity.fqn, corrections)
+
+                if correction_info:
+                    result.applied_corrections.append(correction_info)
+                    if corrected_fqn is None:
+                        result.ignored_fqns.append(entity.fqn)
+                        continue
+
+                if not correction_info:
+                    suspicious = detect_suspicious_fqn(entity.fqn)
+                    if suspicious:
+                        result.suspicious_fqns.append(suspicious)
+
+                corrected_entity = OMEntityInfo(
+                    entity_type=entity.entity_type,
+                    fqn=corrected_fqn
+                )
+                result.existing_outlets.add(corrected_entity)
 
         if task_id in generated:
             result.generated_inlets = set(generated[task_id].inlets)
             result.generated_outlets = set(generated[task_id].outlets)
 
+        # Сравнение key-групп (информационное)
+        if task_id in existing and task_id in generated:
+            _collect_key_mismatches(
+                existing[task_id], generated[task_id], result
+            )
+
         results.append(result)
 
     return results
+
+
+def _collect_key_mismatches(
+    existing_task: TaskOMEntity,
+    generated_task: TaskOMEntity,
+    result: ComparisonResult
+) -> None:
+    """Собирает расхождения по key между existing и generated."""
+    # Строим lookup по (entity_type, normalized_fqn) -> key
+    existing_keys = {}
+    for item in existing_task.inlets + existing_task.outlets:
+        norm_fqn = normalize_fqn(item.fqn)
+        existing_keys[(item.entity_type, norm_fqn)] = item.key
+
+    generated_keys = {}
+    for item in generated_task.inlets + generated_task.outlets:
+        norm_fqn = normalize_fqn(item.fqn)
+        generated_keys[(item.entity_type, norm_fqn)] = item.key
+
+    # Сравниваем ключи для совпадающих entity
+    for ident, ex_key in existing_keys.items():
+        if ident in generated_keys:
+            gen_key = generated_keys[ident]
+            if ex_key != gen_key:
+                result.key_mismatches.append(
+                    (ident[0], ident[1], ex_key, gen_key)
+                )
 
 
 def suggest_mappings(results: List[ComparisonResult]) -> Dict[str, str]:
@@ -342,7 +571,63 @@ def suggest_mappings(results: List[ComparisonResult]) -> Dict[str, str]:
     return suggestions
 
 
-def format_report(dag_path: str, results: List[ComparisonResult], mappings: Dict[str, str]) -> str:
+def suggest_reference_corrections(results: List[ComparisonResult]) -> Dict[str, str]:
+    """
+    Анализирует расхождения и предлагает коррекции reference FQN.
+
+    Ищет паттерны где:
+    - Reference имеет больше частей FQN чем generated
+    - schema.table совпадают, но reference имеет лишние компоненты
+    """
+    suggestions = {}
+
+    for result in results:
+        # Сравниваем missing (reference) с extra (generated)
+        for missing in result.missing_inlets | result.missing_outlets:
+            for extra in result.extra_inlets | result.extra_outlets:
+                # Пропускаем разные типы entity
+                if missing.entity_type != extra.entity_type:
+                    continue
+
+                missing_parts = missing.fqn.split('.')
+                extra_parts = extra.fqn.split('.')
+
+                # Случай 1: Reference имеет 4 части, generated - 3
+                # и последние 2 части совпадают (schema.table)
+                if len(missing_parts) == 4 and len(extra_parts) == 3:
+                    missing_table = '.'.join(missing_parts[-2:])
+                    extra_table = '.'.join(extra_parts[-2:])
+
+                    if missing_table == extra_table:
+                        # Reference имеет лишний компонент
+                        suggestions[missing.fqn] = extra.fqn
+
+                # Случай 2: Одинаковый сервер, одинаковая таблица, разная середина
+                elif len(missing_parts) >= 3 and len(extra_parts) >= 3:
+                    if (missing_parts[0] == extra_parts[0] and
+                        missing_parts[-1] == extra_parts[-1]):
+                        # Сервер и таблица совпадают, середина отличается
+                        if len(missing_parts) > len(extra_parts):
+                            suggestions[missing.fqn] = extra.fqn
+
+        # Также предлагаем коррекции на основе подозрительных паттернов
+        for suspicious in result.suspicious_fqns:
+            if suspicious.suggested_correction:
+                # Проверяем совпадает ли предложенная коррекция с чем-то сгенерированным
+                for gen in result.generated_inlets | result.generated_outlets:
+                    if normalize_fqn(gen.fqn) == normalize_fqn(suspicious.suggested_correction):
+                        suggestions[suspicious.fqn] = suspicious.suggested_correction
+                        break
+
+    return suggestions
+
+
+def format_report(
+    dag_path: str,
+    results: List[ComparisonResult],
+    mappings: Dict[str, str],
+    ref_corrections: Optional[Dict[str, str]] = None
+) -> str:
     """Форматирует отчёт о сравнении."""
     lines = []
     lines.append("=" * 70)
@@ -353,18 +638,83 @@ def format_report(dag_path: str, results: List[ComparisonResult], mappings: Dict
     matches = sum(1 for r in results if r.is_match)
     total = len(results)
 
+    # Статистика по коррекциям
+    total_corrections = sum(len(r.applied_corrections) for r in results)
+    total_suspicious = sum(len(r.suspicious_fqns) for r in results)
+    total_ignored = sum(len(r.ignored_fqns) for r in results)
+    total_key_mismatches = sum(len(r.key_mismatches) for r in results)
+
     lines.append(f"Задач проанализировано: {total}")
     lines.append(f"Полных совпадений: {matches}")
     lines.append(f"С расхождениями: {total - matches}")
+    if total_key_mismatches:
+        lines.append(f"Расхождения по key-группам: {total_key_mismatches}")
+
+    if total_corrections or total_suspicious or total_ignored:
+        lines.append("")
+        lines.append("Коррекции ссылок:")
+        if total_corrections:
+            lines.append(f"  Применено коррекций: {total_corrections}")
+        if total_ignored:
+            lines.append(f"  Пропущено (ignored): {total_ignored}")
+        if total_suspicious:
+            lines.append(f"  Подозрительных FQN: {total_suspicious}")
+
     lines.append("")
 
     # Детали по каждой задаче
     for result in results:
+        # Определяем статус и суффикс
+        has_extras = result.applied_corrections or result.suspicious_fqns
+        suffix_parts = []
+        if result.applied_corrections:
+            suffix_parts.append(f"corrections: {len(result.applied_corrections)}")
+        if result.suspicious_fqns:
+            suffix_parts.append(f"suspicious: {len(result.suspicious_fqns)}")
+        suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+
         if result.is_match:
-            lines.append(f"[OK] {result.task_id}")
+            lines.append(f"[OK] {result.task_id}{suffix}")
+            # Показываем коррекции даже для OK задач
+            if result.applied_corrections:
+                lines.append("")
+                lines.append("    ПРИМЕНЕННЫЕ КОРРЕКЦИИ:")
+                for corr in result.applied_corrections:
+                    if corr.correction_type == 'ignored':
+                        lines.append(f"      [SKIP] {corr.original_fqn}")
+                    elif corr.correction_type == 'exact':
+                        lines.append(f"      [EXACT] {corr.original_fqn}")
+                        lines.append(f"           -> {corr.corrected_fqn}")
+                    elif corr.correction_type == 'pattern':
+                        lines.append(f"      [PATTERN] {corr.original_fqn}")
+                        lines.append(f"             -> {corr.corrected_fqn}")
         else:
-            lines.append(f"[!!] {result.task_id} - РАСХОЖДЕНИЯ:")
+            lines.append(f"[!!] {result.task_id} - РАСХОЖДЕНИЯ:{suffix}")
             lines.append("")
+
+            # Показываем примененные коррекции
+            if result.applied_corrections:
+                lines.append("    ПРИМЕНЕННЫЕ КОРРЕКЦИИ:")
+                for corr in result.applied_corrections:
+                    if corr.correction_type == 'ignored':
+                        lines.append(f"      [SKIP] {corr.original_fqn}")
+                    elif corr.correction_type == 'exact':
+                        lines.append(f"      [EXACT] {corr.original_fqn}")
+                        lines.append(f"           -> {corr.corrected_fqn}")
+                    elif corr.correction_type == 'pattern':
+                        lines.append(f"      [PATTERN] {corr.original_fqn}")
+                        lines.append(f"             -> {corr.corrected_fqn}")
+                lines.append("")
+
+            # Показываем подозрительные FQN
+            if result.suspicious_fqns:
+                lines.append("    ПОДОЗРИТЕЛЬНЫЕ FQN (возможные ошибки в reference):")
+                for susp in result.suspicious_fqns:
+                    lines.append(f"      [?] {susp.fqn}")
+                    lines.append(f"          Причина: {susp.reason}")
+                    if susp.suggested_correction:
+                        lines.append(f"          Возможно: {susp.suggested_correction}")
+                lines.append("")
 
             # СУЩЕСТВУЮЩИЙ (в DAG)
             lines.append("    СУЩЕСТВУЮЩИЙ (в DAG):")
@@ -410,6 +760,31 @@ def format_report(dag_path: str, results: List[ComparisonResult], mappings: Dict
                     lines.append("")
                     lines.append("    [!] Задача не обработана утилитой (нет SQL или API)")
 
+        # Key mismatches (показываем и для OK и для проблемных задач)
+        if result.key_mismatches:
+            lines.append("")
+            lines.append("    KEY-ГРУППЫ (расхождения):")
+            for entity_type, fqn, ex_key, gen_key in result.key_mismatches:
+                ex_str = f"'{ex_key}'" if ex_key else "None"
+                gen_str = f"'{gen_key}'" if gen_key else "None"
+                lines.append(f"      {entity_type}: {fqn}")
+                lines.append(f"        reference: key={ex_str}  generated: key={gen_str}")
+
+        lines.append("")
+
+    # Предложения по коррекциям reference
+    if ref_corrections:
+        lines.append("-" * 70)
+        lines.append("ПРЕДЛОЖЕНИЯ ДЛЯ known_reference_errors.yaml:")
+        lines.append("-" * 70)
+        lines.append("")
+        lines.append("Добавьте в config/known_reference_errors.yaml:")
+        lines.append("```yaml")
+        lines.append("reference_corrections:")
+        lines.append("  exact:")
+        for incorrect, correct in sorted(ref_corrections.items()):
+            lines.append(f'    "{incorrect}": "{correct}"')
+        lines.append("```")
         lines.append("")
 
     # Предложения по маппингам
@@ -430,29 +805,37 @@ def format_report(dag_path: str, results: List[ComparisonResult], mappings: Dict
     return "\n".join(lines)
 
 
-def analyze_dag_force(dag_path: str, mapping_file: Optional[str] = None) -> Dict[str, TaskOMEntity]:
+def analyze_dag_force(dag_path: str, mapping_file: Optional[str] = None, include_dictget_as_inlets: bool = True) -> Dict[str, TaskOMEntity]:
     """
     Анализирует DAG файл ПРИНУДИТЕЛЬНО, игнорируя существующие OMEntity.
 
-    Это нужно для тестирования - чтобы сравнить что утилита сгенерирует
-    с тем что уже есть в DAG.
+    Использует OMEntityGenerator напрямую, временно убирая флаг has_omentity
+    у всех задач, чтобы генератор обработал их.
+
+    Args:
+        include_dictget_as_inlets: Включать ли dictGet таблицы как inlets (по умолчанию False)
     """
-    # Компоненты
     dag_parser = DAGParser()
     sql_analyzer = SQLAnalyzer()
     fqn_builder = FQNBuilder(mapping_file)
-    generator = OMEntityGenerator(fqn_builder)
+    generator = OMEntityGenerator(fqn_builder, include_dictget_as_inlets=include_dictget_as_inlets)
 
     # 1. Парсим DAG
     dag_result = dag_parser.parse_file(dag_path)
 
-    # 2. Анализируем SQL
+    # 2. Временно убираем has_omentity чтобы генератор обработал все задачи
+    original_flags = {}
+    for task in dag_result.tasks:
+        original_flags[task.task_id] = task.has_omentity
+        task.has_omentity = False
+
+    # 3. Анализируем SQL
     sql_results: Dict[str, SQLAnalysisResult] = {}
     for sql_var, sql_code in dag_result.sql_variables.items():
         result = sql_analyzer.analyze(sql_code)
         sql_results[sql_var] = result
 
-    # 3. Связываем функции с SQL
+    # 4. Связываем функции с SQL
     func_sql_results: Dict[str, SQLAnalysisResult] = {}
     for func_name, func_info in dag_result.functions.items():
         combined = SQLAnalysisResult()
@@ -462,160 +845,67 @@ def analyze_dag_force(dag_path: str, mapping_file: Optional[str] = None) -> Dict
         if combined.inlets or combined.outlets or combined.dictionaries:
             func_sql_results[func_name] = combined
 
-    # 4. Генерируем OMEntity для ВСЕХ задач (игнорируя has_omentity)
-    generated_tasks = {}
+    # 5. Генерируем через OMEntityGenerator
+    outputs = generator.generate_for_dag(dag_result, func_sql_results)
 
-    from analyzer.connection_resolver import ConnectionResolver
-    resolver = ConnectionResolver(dag_result)
-
+    # 6. Восстанавливаем флаги
     for task in dag_result.tasks:
-        func_name = task.python_callable
-        if not func_name:
-            continue
+        task.has_omentity = original_flags.get(task.task_id, False)
 
-        conn_id, conn_source = resolver.resolve_for_function(func_name)
-        if not conn_id:
-            conn_id = "UNKNOWN"
-
-        # Собираем SQL результаты
-        sql_result = func_sql_results.get(func_name)
-        if not sql_result:
-            func_info = dag_result.functions.get(func_name)
-            if func_info:
-                combined = SQLAnalysisResult()
-                for sql_var in func_info.sql_variables:
-                    if sql_var in sql_results:
-                        combined = combined.merge(sql_results[sql_var])
-                if combined.inlets or combined.outlets or combined.dictionaries:
-                    sql_result = combined
-
-        # Проверяем наличие API или dst_table в op_kwargs
-        has_api = bool(task.op_kwargs_api) or (func_info and func_info.api_connections)
-        has_dst_table = bool(task.op_kwargs_dst_table)
-        has_cross_server = func_info and func_info.cross_server_calls
-        has_bulk_dump = func_info and func_info.bulk_dump_tables
-
-        if not sql_result and not has_api and not has_dst_table and not has_cross_server and not has_bulk_dump:
-            continue
-
-        # Генерируем OMEntity
-        task_omentity = TaskOMEntity(task_id=task.task_id)
-
-        # API из op_kwargs
-        if task.op_kwargs_api:
-            for api_conn in task.op_kwargs_api:
-                # Резолвим значение переменной
-                if api_conn in dag_result.connection_variables:
-                    api_fqn = dag_result.connection_variables[api_conn]
-                else:
-                    api_fqn = api_conn
-                task_omentity.inlets.append(OMEntityInfo(entity_type="API", fqn=api_fqn))
-
-        # API из функции
-        if func_info and func_info.api_connections:
-            for api_conn in func_info.api_connections:
-                if api_conn in dag_result.connection_variables:
-                    api_fqn = dag_result.connection_variables[api_conn]
-                else:
-                    api_fqn = api_conn
-                inlet = OMEntityInfo(entity_type="API", fqn=api_fqn)
-                if inlet not in task_omentity.inlets:
-                    task_omentity.inlets.append(inlet)
-
-        # dst_table из op_kwargs как outlet
-        if task.op_kwargs_dst_table:
-            dst_table = task.op_kwargs_dst_table
-            # Резолвим переменную из string_variables
-            if dst_table in dag_result.string_variables:
-                dst_table = dag_result.string_variables[dst_table]
-            # Парсим schema.table
-            if '.' in dst_table:
-                parts = dst_table.split('.')
-                schema = parts[0]
-                table = parts[1] if len(parts) > 1 else ''
-                fqn = fqn_builder.build_fqn(conn_id, schema, table)
-                task_omentity.outlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))
-
-        # bulk_dump tables из функции как outlet
-        if func_info and func_info.bulk_dump_tables:
-            for table_type, table_value in func_info.bulk_dump_tables:
-                resolved_table = None
-
-                if table_type == 'param':
-                    # Это параметр функции - резолвим из op_kwargs
-                    if task.op_kwargs_all and table_value in task.op_kwargs_all:
-                        kwarg_value = task.op_kwargs_all[table_value]
-                        # Резолвим переменную из string_variables
-                        if kwarg_value in dag_result.string_variables:
-                            resolved_table = dag_result.string_variables[kwarg_value]
-                        else:
-                            resolved_table = kwarg_value
-                else:
-                    # Это literal или переменная в scope функции
-                    if table_value in dag_result.string_variables:
-                        resolved_table = dag_result.string_variables[table_value]
-                    elif '.' in table_value:
-                        # Уже schema.table
-                        resolved_table = table_value
-
-                if resolved_table and '.' in resolved_table:
-                    parts = resolved_table.split('.', 1)
-                    schema = parts[0]
-                    table = parts[1] if len(parts) > 1 else ''
-                    fqn = fqn_builder.build_fqn(conn_id, schema, table)
-                    outlet = OMEntityInfo(entity_type="TABLE", fqn=fqn)
-                    if outlet not in task_omentity.outlets:
-                        task_omentity.outlets.append(outlet)
-
-        # Обрабатываем SQL результаты если есть
-        if sql_result:
-            # Inlets
-            for table_ref in sql_result.inlets:
-                if table_ref.is_remote:
-                    fqn = fqn_builder.build_fqn_for_remote(
-                        conn_id, table_ref.remote_prefix, table_ref.table)
-                else:
-                    fqn = fqn_builder.build_fqn(conn_id, table_ref.schema, table_ref.table)
-                task_omentity.inlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))
-
-            # Dictionaries -> inlets
-            for dict_ref in sql_result.dictionaries:
-                fqn = fqn_builder.build_fqn(conn_id, dict_ref.schema, dict_ref.table)
-                task_omentity.inlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))
-
-            # Outlets
-            for table_ref in sql_result.outlets:
-                fqn = fqn_builder.build_fqn(conn_id, table_ref.schema, table_ref.table)
-                task_omentity.outlets.append(OMEntityInfo(entity_type="TABLE", fqn=fqn))
-
-        generated_tasks[task.task_id] = task_omentity
+    # 7. Конвертируем OMEntityOutput -> TaskOMEntity
+    generated_tasks = {}
+    for output in outputs:
+        task_omentity = TaskOMEntity(task_id=output.task_id)
+        for item in output.inlets:
+            task_omentity.inlets.append(OMEntityInfo(
+                entity_type=item.entity_type.value,
+                fqn=item.fqn,
+                key=item.key
+            ))
+        for item in output.outlets:
+            task_omentity.outlets.append(OMEntityInfo(
+                entity_type=item.entity_type.value,
+                fqn=item.fqn,
+                key=item.key
+            ))
+        generated_tasks[output.task_id] = task_omentity
 
     return generated_tasks
 
 
-def test_dag_file(dag_path: str, mapping_file: Optional[str] = None) -> Tuple[str, List[ComparisonResult], Dict[str, str]]:
+def test_dag_file(
+    dag_path: str,
+    mapping_file: Optional[str] = None,
+    corrections_file: Optional[str] = None
+) -> Tuple[str, List[ComparisonResult], Dict[str, str], Dict[str, str]]:
     """
     Тестирует один DAG файл.
 
     Returns:
-        (report, results, suggested_mappings)
+        (report, results, suggested_mappings, suggested_ref_corrections)
     """
+    # Загружаем коррекции reference
+    corrections = load_reference_corrections(corrections_file)
+
     # 1. Извлекаем существующие OMEntity из DAG
     existing = extract_existing_omentity(dag_path)
 
     # 2. Анализируем DAG принудительно (игнорируя существующие OMEntity)
     generated = analyze_dag_force(dag_path, mapping_file)
 
-    # 3. Сравниваем
-    results = compare_omentity(existing, generated)
+    # 3. Сравниваем (с учётом коррекций)
+    results = compare_omentity(existing, generated, corrections)
 
-    # 4. Предлагаем маппинги
+    # 4. Предлагаем маппинги серверов
     mappings = suggest_mappings(results)
 
-    # 5. Формируем отчёт
-    report = format_report(dag_path, results, mappings)
+    # 5. Предлагаем коррекции reference
+    ref_corrections = suggest_reference_corrections(results)
 
-    return report, results, mappings
+    # 6. Формируем отчёт
+    report = format_report(dag_path, results, mappings, ref_corrections)
+
+    return report, results, mappings, ref_corrections
 
 
 def test_all_samples(samples_dir: str = "Dags samples", mapping_file: Optional[str] = None) -> str:
@@ -631,13 +921,15 @@ def test_all_samples(samples_dir: str = "Dags samples", mapping_file: Optional[s
 
     all_reports = []
     all_mappings = {}
+    all_ref_corrections = {}
     total_tasks = 0
     total_matches = 0
 
     for dag_file in sorted(dag_files):
-        report, results, mappings = test_dag_file(str(dag_file), mapping_file)
+        report, results, mappings, ref_corrections = test_dag_file(str(dag_file), mapping_file)
         all_reports.append(report)
         all_mappings.update(mappings)
+        all_ref_corrections.update(ref_corrections)
         total_tasks += len(results)
         total_matches += sum(1 for r in results if r.is_match)
 
@@ -651,6 +943,17 @@ def test_all_samples(samples_dir: str = "Dags samples", mapping_file: Optional[s
     summary.append(f"Совпадений: {total_matches}")
     summary.append(f"Расхождений: {total_tasks - total_matches}")
     summary.append("")
+
+    # Все предложенные коррекции reference
+    if all_ref_corrections:
+        summary.append("ВСЕ ПРЕДЛОЖЕННЫЕ КОРРЕКЦИИ REFERENCE:")
+        summary.append("```yaml")
+        summary.append("reference_corrections:")
+        summary.append("  exact:")
+        for incorrect, correct in sorted(all_ref_corrections.items()):
+            summary.append(f'    "{incorrect}": "{correct}"')
+        summary.append("```")
+        summary.append("")
 
     if all_mappings:
         summary.append("ВСЕ ПРЕДЛОЖЕННЫЕ МАППИНГИ:")
@@ -668,10 +971,20 @@ def main():
     mapping_file = str(ROOT_DIR / "config" / "server_mapping.yaml")
 
     if len(sys.argv) > 1:
-        # Тест конкретного файла
-        dag_path = sys.argv[1]
-        report, _, _ = test_dag_file(dag_path, mapping_file)
-        print(report)
+        arg = sys.argv[1]
+
+        if arg in ('--ref', '--reference'):
+            # Тест reference dags
+            report = test_all_samples(
+                samples_dir="Base docs/reference dags",
+                mapping_file=mapping_file
+            )
+            print(report)
+        else:
+            # Тест конкретного файла
+            dag_path = arg
+            report, _, _, _ = test_dag_file(dag_path, mapping_file)
+            print(report)
     else:
         # Тест всех samples
         report = test_all_samples(mapping_file=mapping_file)

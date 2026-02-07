@@ -4,19 +4,23 @@ from typing import List, Dict, Optional
 
 from analyzer.models import (
     SQLAnalysisResult, DAGParseResult, TaskInfo,
-    OMEntityOutput, EntityType, TableReference, FunctionInfo
+    OMEntityOutput, OMEntityItem, EntityType, TableReference,
+    FunctionInfo, DataFlowGroup
 )
 from analyzer.sql_analyzer import SQLAnalyzer
 from analyzer.connection_resolver import ConnectionResolver
 from .fqn_builder import FQNBuilder
+from .key_assigner import KeyAssigner
 
 
 class OMEntityGenerator:
     """Генератор OMEntity кода для DAG задач."""
 
-    def __init__(self, fqn_builder: FQNBuilder):
+    def __init__(self, fqn_builder: FQNBuilder, include_dictget_as_inlets: bool = True):
         self.fqn_builder = fqn_builder
         self.sql_analyzer = SQLAnalyzer()
+        self.include_dictget_as_inlets = include_dictget_as_inlets
+        self.key_assigner = KeyAssigner()
 
     def generate_for_dag(
         self,
@@ -69,8 +73,9 @@ class OMEntityGenerator:
             has_cross_server = func_info and func_info.cross_server_calls
             has_api = (func_info and func_info.api_connections) or task.op_kwargs_api
             has_dst_table = task.op_kwargs_dst_table
+            has_bulk_dump = func_info and func_info.bulk_dump_tables
 
-            if not sql_result and not has_cross_server and not has_api and not has_dst_table:
+            if not sql_result and not has_cross_server and not has_api and not has_dst_table and not has_bulk_dump:
                 continue
 
             output = self._generate_for_task(
@@ -91,166 +96,49 @@ class OMEntityGenerator:
         dag_result: DAGParseResult = None,
         resolver: ConnectionResolver = None
     ) -> OMEntityOutput:
-        """Генерирует OMEntity для одной задачи."""
-        inlets = []
-        outlets = []
+        """Генерирует OMEntity для одной задачи через flow-группы."""
+        flows = []
         warnings = []
 
-        # Инициализируем sql_result если None
         if sql_result is None:
             sql_result = SQLAnalysisResult()
 
-        # Обрабатываем API connections из функции
-        if func_info and func_info.api_connections:
-            for api_conn in func_info.api_connections:
-                # Резолвим значение переменной если нужно
-                if dag_result and api_conn in dag_result.connection_variables:
-                    api_fqn = dag_result.connection_variables[api_conn]
-                else:
-                    api_fqn = api_conn
-                inlets.append((EntityType.API, api_fqn))
+        # FLOW: API → bulk_dump/dst_table
+        api_flow = self._build_api_flow(
+            task, connection_id, func_info, dag_result
+        )
+        if api_flow and (api_flow.inlets or api_flow.outlets):
+            flows.append(api_flow)
 
-        # Обрабатываем API connections из op_kwargs задачи
-        if task.op_kwargs_api:
-            for api_conn in task.op_kwargs_api:
-                # Резолвим значение переменной если нужно
-                if dag_result and api_conn in dag_result.connection_variables:
-                    api_fqn = dag_result.connection_variables[api_conn]
-                else:
-                    api_fqn = api_conn
-                inlet_tuple = (EntityType.API, api_fqn)
-                if inlet_tuple not in inlets:
-                    inlets.append(inlet_tuple)
-
-        # Обрабатываем dst_table из op_kwargs как outlet
-        if task.op_kwargs_dst_table and dag_result:
-            dst_table = task.op_kwargs_dst_table
-            # Резолвим переменную из string_variables
-            if dst_table in dag_result.string_variables:
-                dst_table = dag_result.string_variables[dst_table]
-            # Парсим schema.table
-            if '.' in dst_table:
-                parts = dst_table.split('.')
-                schema = parts[0]
-                table = parts[1] if len(parts) > 1 else ''
-                fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
-                outlets.append((EntityType.TABLE, fqn))
-
-        # Обрабатываем bulk_dump tables из функции
-        if func_info and func_info.bulk_dump_tables and dag_result:
-            for table_type, table_value in func_info.bulk_dump_tables:
-                resolved_table = None
-
-                if table_type == 'param':
-                    # Это параметр функции - резолвим из op_kwargs
-                    if task.op_kwargs_all and table_value in task.op_kwargs_all:
-                        kwarg_value = task.op_kwargs_all[table_value]
-                        # Резолвим переменную из string_variables
-                        if kwarg_value in dag_result.string_variables:
-                            resolved_table = dag_result.string_variables[kwarg_value]
-                        else:
-                            resolved_table = kwarg_value
-                else:
-                    # Это literal или переменная в scope функции
-                    if table_value in dag_result.string_variables:
-                        resolved_table = dag_result.string_variables[table_value]
-                    elif '.' in table_value:
-                        # Уже schema.table
-                        resolved_table = table_value
-
-                if resolved_table and '.' in resolved_table:
-                    parts = resolved_table.split('.', 1)
-                    schema = parts[0]
-                    table = parts[1] if len(parts) > 1 else ''
-                    fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
-                    outlet_tuple = (EntityType.TABLE, fqn)
-                    if outlet_tuple not in outlets:
-                        outlets.append(outlet_tuple)
-
-        # Обрабатываем cross-server вызовы
+        # FLOW(s): Cross-server calls (каждый вызов — отдельный набор flow)
         if func_info and func_info.cross_server_calls and dag_result:
-            for call in func_info.cross_server_calls:
-                # Резолвим source и destination connections
-                src_conn = call.src_connection
-                if src_conn in dag_result.connection_variables:
-                    src_conn = dag_result.connection_variables[src_conn]
-
-                dst_conn = call.dst_connection
-                if dst_conn in dag_result.connection_variables:
-                    dst_conn = dag_result.connection_variables[dst_conn]
-
-                # Анализируем take_data SQL для inlets
-                take_sql = dag_result.sql_variables.get(call.take_data_var)
-                if take_sql:
-                    take_result = self.sql_analyzer.analyze(take_sql)
-                    for table_ref in take_result.inlets:
-                        if table_ref.is_remote:
-                            fqn = self.fqn_builder.build_fqn_for_remote(
-                                src_conn, table_ref.remote_prefix, table_ref.table
-                            )
-                        else:
-                            fqn = self.fqn_builder.build_fqn(src_conn, table_ref.schema, table_ref.table)
-                        inlet_tuple = (EntityType.TABLE, fqn)
-                        if inlet_tuple not in inlets:
-                            inlets.append(inlet_tuple)
-
-                # Анализируем insert_data SQL для outlets
-                insert_sql = dag_result.sql_variables.get(call.insert_data_var)
-                if insert_sql:
-                    insert_result = self.sql_analyzer.analyze(insert_sql)
-                    for table_ref in insert_result.outlets:
-                        fqn = self.fqn_builder.build_fqn(dst_conn, table_ref.schema, table_ref.table)
-                        outlet_tuple = (EntityType.TABLE, fqn)
-                        if outlet_tuple not in outlets:
-                            outlets.append(outlet_tuple)
-
-        # Обрабатываем inlets (FROM/JOIN таблицы)
-        for table_ref in sql_result.inlets:
-            if table_ref.is_remote:
-                fqn = self.fqn_builder.build_fqn_for_remote(
-                    connection_id, table_ref.remote_prefix, table_ref.table
-                )
-                warnings.append(
-                    f'"{table_ref.full_name}" uses prefix "{table_ref.remote_prefix}" - different connection?'
-                )
-            else:
-                fqn = self.fqn_builder.build_fqn(
-                    connection_id,
-                    table_ref.schema,
-                    table_ref.table
-                )
-            inlets.append((EntityType.TABLE, fqn))
-
-        # Обрабатываем dictionaries
-        for dict_ref in sql_result.dictionaries:
-            fqn = self.fqn_builder.build_fqn(
-                connection_id,
-                dict_ref.schema,
-                dict_ref.table
+            cs_flows = self._build_cross_server_flows(
+                func_info, connection_id, dag_result, warnings
             )
-            inlets.append((EntityType.TABLE, fqn))
+            flows.extend(cs_flows)
 
-        # Обрабатываем remote таблицы (если ещё не добавлены через inlets)
-        for table_ref in sql_result.remote_tables:
-            fqn = self.fqn_builder.build_fqn_for_remote(
-                connection_id, table_ref.remote_prefix, table_ref.table
-            )
-            inlet_tuple = (EntityType.TABLE, fqn)
-            if inlet_tuple not in inlets:
-                inlets.append(inlet_tuple)
+        # FLOW(s): SQL (per-statement)
+        sql_flows = self._build_sql_flows(
+            connection_id, sql_result, func_info, dag_result, task, warnings
+        )
+        # Не добавляем SQL flow если cross-server уже покрыл те же таблицы
+        if sql_flows:
+            cs_inlet_fqns = set()
+            cs_outlet_fqns = set()
+            for f in flows:
+                if f.flow_type == 'cross_server':
+                    cs_inlet_fqns.update(i.fqn for i in f.inlets)
+                    cs_outlet_fqns.update(o.fqn for o in f.outlets)
 
-        # Обрабатываем outlets (INSERT INTO)
-        for table_ref in sql_result.outlets:
-            fqn = self.fqn_builder.build_fqn(
-                connection_id,
-                table_ref.schema,
-                table_ref.table
-            )
-            outlets.append((EntityType.TABLE, fqn))
+            for sf in sql_flows:
+                # Проверяем что SQL flow не полностью покрыт cross-server
+                sf_inlet_fqns = {i.fqn for i in sf.inlets}
+                sf_outlet_fqns = {o.fqn for o in sf.outlets}
+                if not (sf_inlet_fqns <= cs_inlet_fqns and sf_outlet_fqns <= cs_outlet_fqns):
+                    flows.append(sf)
 
-        # Убираем дубликаты сохраняя порядок
-        inlets = list(dict.fromkeys(inlets))
-        outlets = list(dict.fromkeys(outlets))
+        # Назначаем key через KeyAssigner
+        inlets, outlets = self.key_assigner.assign_keys(flows)
 
         # Генерируем код
         code = self._format_omentity_code(
@@ -275,14 +163,381 @@ class OMEntityGenerator:
             generated_code=code
         )
 
+    def _build_api_flow(
+        self,
+        task: TaskInfo,
+        connection_id: str,
+        func_info: FunctionInfo,
+        dag_result: DAGParseResult
+    ) -> Optional[DataFlowGroup]:
+        """Собирает flow для API → bulk_dump/dst_table."""
+        inlets = []
+        outlets = []
+
+        # API inlets из функции
+        if func_info and func_info.api_connections:
+            for api_conn in func_info.api_connections:
+                if dag_result and api_conn in dag_result.connection_variables:
+                    api_fqn = dag_result.connection_variables[api_conn]
+                else:
+                    api_fqn = api_conn
+                inlets.append(OMEntityItem(EntityType.API, api_fqn))
+
+        # API inlets из op_kwargs задачи
+        if task.op_kwargs_api:
+            for api_conn in task.op_kwargs_api:
+                if dag_result and api_conn in dag_result.connection_variables:
+                    api_fqn = dag_result.connection_variables[api_conn]
+                else:
+                    api_fqn = api_conn
+                item = OMEntityItem(EntityType.API, api_fqn)
+                if item not in inlets:
+                    inlets.append(item)
+
+        if not inlets:
+            return None
+
+        # Outlets: dst_table из op_kwargs
+        if task.op_kwargs_dst_table and dag_result:
+            dst_table = task.op_kwargs_dst_table
+            if dst_table in dag_result.string_variables:
+                dst_table = dag_result.string_variables[dst_table]
+            if '.' in dst_table:
+                parts = dst_table.split('.')
+                schema = parts[0]
+                table = parts[1] if len(parts) > 1 else ''
+                fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+                outlets.append(OMEntityItem(EntityType.TABLE, fqn))
+
+        # Outlets: bulk_dump tables из функции
+        if func_info and func_info.bulk_dump_tables and dag_result:
+            for table_type, table_value in func_info.bulk_dump_tables:
+                resolved_table = self._resolve_bulk_dump_table(
+                    table_type, table_value, task, dag_result
+                )
+                if resolved_table and '.' in resolved_table:
+                    parts = resolved_table.split('.', 1)
+                    schema = parts[0]
+                    table = parts[1] if len(parts) > 1 else ''
+                    fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+                    item = OMEntityItem(EntityType.TABLE, fqn)
+                    if item not in outlets:
+                        outlets.append(item)
+
+        return DataFlowGroup(
+            flow_type='api',
+            inlets=inlets,
+            outlets=outlets,
+            source_description='API connection → bulk_dump/dst_table'
+        )
+
+    def _build_sql_flows(
+        self,
+        connection_id: str,
+        sql_result: SQLAnalysisResult,
+        func_info: FunctionInfo,
+        dag_result: DAGParseResult,
+        task: TaskInfo,
+        warnings: List[str]
+    ) -> List[DataFlowGroup]:
+        """
+        Собирает flow-группы из SQL анализа.
+
+        Использует per-statement анализ для разделения на key-группы.
+        """
+        flows = []
+
+        if not func_info or not dag_result:
+            # Fallback: один flow из sql_result
+            if sql_result and (sql_result.inlets or sql_result.outlets):
+                flow = self._sql_result_to_flow(connection_id, sql_result, warnings)
+                if flow:
+                    flows.append(flow)
+            return flows
+
+        # Пробуем per-statement анализ
+        per_stmt_results = []
+        for sql_var in func_info.sql_variables:
+            sql_code = dag_result.sql_variables.get(sql_var)
+            if sql_code:
+                stmt_results = self.sql_analyzer.analyze_per_statement(sql_code)
+                per_stmt_results.extend(stmt_results)
+
+        if per_stmt_results and len(per_stmt_results) > 1:
+            # Несколько statement'ов — каждый в отдельный flow
+            for stmt_result in per_stmt_results:
+                flow = self._sql_result_to_flow(connection_id, stmt_result, warnings)
+                if flow:
+                    flows.append(flow)
+        elif sql_result and (sql_result.inlets or sql_result.outlets):
+            # Один statement или fallback — один flow
+            flow = self._sql_result_to_flow(connection_id, sql_result, warnings)
+            if flow:
+                flows.append(flow)
+
+        # Добавляем bulk_dump outlets (если нет API flow)
+        if func_info and func_info.bulk_dump_tables and dag_result:
+            has_api = (func_info.api_connections) or task.op_kwargs_api
+            if not has_api:
+                bulk_outlets = self._resolve_bulk_dump_outlets(
+                    func_info, task, connection_id, dag_result
+                )
+                if bulk_outlets:
+                    # Добавляем bulk_dump outlets к последнему SQL flow
+                    if flows:
+                        for item in bulk_outlets:
+                            if item not in flows[-1].outlets:
+                                flows[-1].outlets.append(item)
+                    else:
+                        flows.append(DataFlowGroup(
+                            flow_type='bulk_dump',
+                            outlets=bulk_outlets,
+                            source_description='bulk_dump tables'
+                        ))
+
+        # Добавляем dst_table outlet (если нет API flow)
+        if task.op_kwargs_dst_table and dag_result:
+            has_api = (func_info and func_info.api_connections) or task.op_kwargs_api
+            if not has_api:
+                dst_table = task.op_kwargs_dst_table
+                if dst_table in dag_result.string_variables:
+                    dst_table = dag_result.string_variables[dst_table]
+                if '.' in dst_table:
+                    parts = dst_table.split('.')
+                    schema = parts[0]
+                    table = parts[1] if len(parts) > 1 else ''
+                    fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+                    item = OMEntityItem(EntityType.TABLE, fqn)
+                    if flows:
+                        if item not in flows[-1].outlets:
+                            flows[-1].outlets.append(item)
+                    else:
+                        flows.append(DataFlowGroup(
+                            flow_type='sql',
+                            outlets=[item],
+                            source_description='dst_table from op_kwargs'
+                        ))
+
+        return flows
+
+    def _sql_result_to_flow(
+        self,
+        connection_id: str,
+        sql_result: SQLAnalysisResult,
+        warnings: List[str]
+    ) -> Optional[DataFlowGroup]:
+        """Конвертирует SQLAnalysisResult в DataFlowGroup."""
+        inlets = []
+        outlets = []
+
+        # Inlets из FROM/JOIN
+        for table_ref in sql_result.inlets:
+            if table_ref.is_remote:
+                fqn = self.fqn_builder.build_fqn_for_remote(
+                    connection_id, table_ref.remote_prefix, table_ref.table
+                )
+                warnings.append(
+                    f'"{table_ref.full_name}" uses prefix "{table_ref.remote_prefix}" - different connection?'
+                )
+            else:
+                fqn = self.fqn_builder.build_fqn(
+                    connection_id, table_ref.schema, table_ref.table
+                )
+            inlets.append(OMEntityItem(EntityType.TABLE, fqn))
+
+        # Dictionaries (опционально)
+        if self.include_dictget_as_inlets:
+            for dict_ref in sql_result.dictionaries:
+                fqn = self.fqn_builder.build_fqn(
+                    connection_id, dict_ref.schema, dict_ref.table
+                )
+                inlets.append(OMEntityItem(EntityType.TABLE, fqn))
+
+        # Remote tables (если не добавлены через inlets)
+        for table_ref in sql_result.remote_tables:
+            fqn = self.fqn_builder.build_fqn_for_remote(
+                connection_id, table_ref.remote_prefix, table_ref.table
+            )
+            item = OMEntityItem(EntityType.TABLE, fqn)
+            if item not in inlets:
+                inlets.append(item)
+
+        # Outlets из INSERT INTO
+        for table_ref in sql_result.outlets:
+            fqn = self.fqn_builder.build_fqn(
+                connection_id, table_ref.schema, table_ref.table
+            )
+            outlets.append(OMEntityItem(EntityType.TABLE, fqn))
+
+        if not inlets and not outlets:
+            return None
+
+        return DataFlowGroup(
+            flow_type='sql',
+            inlets=inlets,
+            outlets=outlets,
+            source_description='SQL FROM/JOIN → INSERT INTO'
+        )
+
+    def _build_cross_server_flows(
+        self,
+        func_info: FunctionInfo,
+        connection_id: str,
+        dag_result: DAGParseResult,
+        warnings: List[str]
+    ) -> List[DataFlowGroup]:
+        """Собирает flow-группы из cross-server вызовов (copy_ch_to_ch_pipe)."""
+        flows = []
+
+        for call in func_info.cross_server_calls:
+            # Резолвим source и destination connections
+            src_conn = call.src_connection
+            if src_conn in dag_result.connection_variables:
+                src_conn = dag_result.connection_variables[src_conn]
+
+            dst_conn = call.dst_connection
+            if dst_conn in dag_result.connection_variables:
+                dst_conn = dag_result.connection_variables[dst_conn]
+
+            # Resolve take_data SQL: sql_variables → string_variables → inline
+            take_sql = None
+            if call.take_data_var:
+                take_sql = dag_result.sql_variables.get(call.take_data_var)
+                if not take_sql:
+                    take_sql = dag_result.string_variables.get(call.take_data_var)
+            if not take_sql and call.take_data_inline:
+                take_sql = call.take_data_inline
+
+            # Resolve insert_data SQL: sql_variables → string_variables → inline
+            insert_sql = None
+            if call.insert_data_var:
+                insert_sql = dag_result.sql_variables.get(call.insert_data_var)
+                if not insert_sql:
+                    insert_sql = dag_result.string_variables.get(call.insert_data_var)
+            if not insert_sql and call.insert_data_inline:
+                insert_sql = call.insert_data_inline
+
+            if take_sql:
+                stmt_results = self.sql_analyzer.analyze_per_statement(take_sql)
+
+                for stmt_result in stmt_results:
+                    inlets = []
+                    outlets = []
+
+                    # Inlets из take_data SQL
+                    for table_ref in stmt_result.inlets:
+                        if table_ref.is_remote:
+                            fqn = self.fqn_builder.build_fqn_for_remote(
+                                src_conn, table_ref.remote_prefix, table_ref.table
+                            )
+                        else:
+                            fqn = self.fqn_builder.build_fqn(
+                                src_conn, table_ref.schema, table_ref.table
+                            )
+                        item = OMEntityItem(EntityType.TABLE, fqn)
+                        if item not in inlets:
+                            inlets.append(item)
+
+                    # Outlets из take_data (если есть INSERT — внутренний шаг)
+                    if stmt_result.outlets:
+                        for table_ref in stmt_result.outlets:
+                            fqn = self.fqn_builder.build_fqn(
+                                src_conn, table_ref.schema, table_ref.table
+                            )
+                            item = OMEntityItem(EntityType.TABLE, fqn)
+                            if item not in outlets:
+                                outlets.append(item)
+                    else:
+                        # Финальный SELECT → insert_data на dst_conn
+                        if insert_sql:
+                            insert_result = self.sql_analyzer.analyze(insert_sql)
+                            for table_ref in insert_result.outlets:
+                                fqn = self.fqn_builder.build_fqn(
+                                    dst_conn, table_ref.schema, table_ref.table
+                                )
+                                item = OMEntityItem(EntityType.TABLE, fqn)
+                                if item not in outlets:
+                                    outlets.append(item)
+
+                    if inlets or outlets:
+                        flows.append(DataFlowGroup(
+                            flow_type='cross_server',
+                            inlets=inlets,
+                            outlets=outlets,
+                            source_description=f'copy_ch_to_ch_pipe {src_conn} → {dst_conn}'
+                        ))
+            else:
+                # Нет take_data SQL — только outlets из insert_data
+                if insert_sql:
+                    insert_result = self.sql_analyzer.analyze(insert_sql)
+                    outlets = []
+                    for table_ref in insert_result.outlets:
+                        fqn = self.fqn_builder.build_fqn(
+                            dst_conn, table_ref.schema, table_ref.table
+                        )
+                        outlets.append(OMEntityItem(EntityType.TABLE, fqn))
+
+                    if outlets:
+                        flows.append(DataFlowGroup(
+                            flow_type='cross_server',
+                            outlets=outlets,
+                            source_description=f'copy_ch_to_ch_pipe → {dst_conn} (no take_data)'
+                        ))
+
+        return flows
+
+    def _resolve_bulk_dump_table(
+        self,
+        table_type: str,
+        table_value: str,
+        task: TaskInfo,
+        dag_result: DAGParseResult
+    ) -> Optional[str]:
+        """Резолвит значение bulk_dump table."""
+        if table_type == 'param':
+            if task.op_kwargs_all and table_value in task.op_kwargs_all:
+                kwarg_value = task.op_kwargs_all[table_value]
+                if kwarg_value in dag_result.string_variables:
+                    return dag_result.string_variables[kwarg_value]
+                return kwarg_value
+        else:
+            if table_value in dag_result.string_variables:
+                return dag_result.string_variables[table_value]
+            elif '.' in table_value:
+                return table_value
+        return None
+
+    def _resolve_bulk_dump_outlets(
+        self,
+        func_info: FunctionInfo,
+        task: TaskInfo,
+        connection_id: str,
+        dag_result: DAGParseResult
+    ) -> List[OMEntityItem]:
+        """Резолвит все bulk_dump tables в OMEntityItem outlets."""
+        outlets = []
+        for table_type, table_value in func_info.bulk_dump_tables:
+            resolved = self._resolve_bulk_dump_table(
+                table_type, table_value, task, dag_result
+            )
+            if resolved and '.' in resolved:
+                parts = resolved.split('.', 1)
+                schema = parts[0]
+                table = parts[1] if len(parts) > 1 else ''
+                fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+                item = OMEntityItem(EntityType.TABLE, fqn)
+                if item not in outlets:
+                    outlets.append(item)
+        return outlets
+
     def _format_omentity_code(
         self,
         task_id: str,
         func_name: Optional[str],
         conn_id: str,
         conn_source: str,
-        inlets: List[tuple],
-        outlets: List[tuple],
+        inlets: List[OMEntityItem],
+        outlets: List[OMEntityItem],
         warnings: List[str],
         sql_result: SQLAnalysisResult
     ) -> str:
@@ -338,8 +593,17 @@ class OMEntityGenerator:
         # Код inlets
         if inlets:
             lines.append("inlets=[")
-            for entity_type, fqn in inlets:
-                lines.append(f'    OMEntity(entity=Entity.{entity_type.value}, fqn="{fqn}"),')
+            for item in inlets:
+                if item.key:
+                    lines.append(
+                        f'    OMEntity(entity=Entity.{item.entity_type.value}, '
+                        f'fqn="{item.fqn}", key="{item.key}"),'
+                    )
+                else:
+                    lines.append(
+                        f'    OMEntity(entity=Entity.{item.entity_type.value}, '
+                        f'fqn="{item.fqn}"),'
+                    )
             lines.append("],")
         else:
             lines.append("inlets=[],")
@@ -347,8 +611,17 @@ class OMEntityGenerator:
         # Код outlets
         if outlets:
             lines.append("outlets=[")
-            for entity_type, fqn in outlets:
-                lines.append(f'    OMEntity(entity=Entity.{entity_type.value}, fqn="{fqn}"),')
+            for item in outlets:
+                if item.key:
+                    lines.append(
+                        f'    OMEntity(entity=Entity.{item.entity_type.value}, '
+                        f'fqn="{item.fqn}", key="{item.key}"),'
+                    )
+                else:
+                    lines.append(
+                        f'    OMEntity(entity=Entity.{item.entity_type.value}, '
+                        f'fqn="{item.fqn}"),'
+                    )
             lines.append("]")
         else:
             lines.append("outlets=[]")

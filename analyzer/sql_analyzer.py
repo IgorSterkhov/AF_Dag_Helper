@@ -85,6 +85,10 @@ class SQLAnalyzer:
         if isinstance(statement, exp.Drop):
             return  # Игнорируем DROP
 
+        # Проверяем на TRUNCATE TABLE
+        if isinstance(statement, exp.TruncateTable):
+            return  # Игнорируем TRUNCATE
+
         # Проверяем на INSERT
         if isinstance(statement, exp.Insert):
             self._handle_insert(statement, result)
@@ -124,6 +128,10 @@ class SQLAnalyzer:
         # Получаем целевую таблицу
         table_expr = statement.this
         if table_expr:
+            # Когда INSERT имеет список колонок, statement.this - это Schema, а не Table
+            if isinstance(table_expr, exp.Schema):
+                table_expr = table_expr.this  # Извлекаем Table из Schema
+
             table_ref = self._parse_table_expression(table_expr, TableSource.INSERT)
             if table_ref:
                 result.outlets.append(table_ref)
@@ -316,6 +324,92 @@ class SQLAnalyzer:
                 return f"{schema}.{name}"
             return name
         return None
+
+    def analyze_per_statement(self, sql: str) -> List[SQLAnalysisResult]:
+        """
+        Анализирует SQL и возвращает результаты по каждому statement отдельно.
+
+        Используется для определения key-групп: каждый statement с inlets/outlets
+        потенциально представляет отдельный поток данных.
+
+        Returns:
+            Список SQLAnalysisResult, по одному на каждый значимый statement.
+            TRUNCATE, DROP, CREATE TEMPORARY TABLE пропускаются.
+        """
+        results = []
+        self._temp_tables.clear()
+
+        try:
+            statements = sqlglot.parse(sql, dialect=self.dialect)
+        except Exception:
+            # Fallback: возвращаем один общий результат
+            return [self.analyze(sql)]
+
+        # Первый проход: собираем temporary tables
+        for statement in statements:
+            if statement is None:
+                continue
+            if isinstance(statement, exp.Create):
+                table_expr = statement.this
+                if table_expr:
+                    table_name = self._get_table_name(table_expr)
+                    if table_name:
+                        sql_text = statement.sql(dialect=self.dialect).lower()
+                        if 'temporary' in sql_text or 'temp ' in sql_text:
+                            self._temp_tables.add(table_name)
+
+        # Второй проход: анализируем каждый statement
+        for statement in statements:
+            if statement is None:
+                continue
+
+            stmt_result = SQLAnalysisResult()
+            self._analyze_statement(statement, stmt_result)
+
+            # Удаляем временные таблицы
+            stmt_result.inlets = [t for t in stmt_result.inlets if t.full_name not in self._temp_tables]
+            stmt_result.outlets = [t for t in stmt_result.outlets if t.full_name not in self._temp_tables]
+
+            # Убираем дубликаты
+            stmt_result.inlets = list(set(stmt_result.inlets))
+            stmt_result.outlets = list(set(stmt_result.outlets))
+            stmt_result.dictionaries = list(set(stmt_result.dictionaries))
+            stmt_result.remote_tables = list(set(stmt_result.remote_tables))
+
+            # Добавляем только если есть значимые данные
+            if stmt_result.inlets or stmt_result.outlets:
+                results.append(stmt_result)
+
+        # Также парсим ALTER TABLE и OPTIMIZE через regex
+        alter_result = SQLAnalysisResult()
+        self._extract_alter_table_partitions(sql, alter_result)
+        self._extract_optimize_table(sql, alter_result)
+
+        # ALTER/OPTIMIZE таблицы, не покрытые sqlglot — добавляем как отдельные statements
+        # Группируем ALTER по парам (outlet, inlet)
+        if alter_result.outlets or alter_result.inlets:
+            # Каждый ALTER с FROM — отдельный flow (inlet→outlet)
+            alter_outlets_seen = set()
+            for i, outlet in enumerate(alter_result.outlets):
+                ar = SQLAnalysisResult()
+                ar.outlets.append(outlet)
+                # Ищем соответствующий inlet (ALTER ... FROM source)
+                if i < len(alter_result.inlets):
+                    inlet = alter_result.inlets[i]
+                    ar.inlets.append(inlet)
+                    if inlet.is_remote:
+                        ar.remote_tables.append(inlet)
+                alter_outlets_seen.add(outlet.full_name)
+
+                # Не дублируем если такой outlet уже есть в основных results
+                already_covered = any(
+                    any(o.full_name == outlet.full_name for o in r.outlets)
+                    for r in results
+                )
+                if not already_covered:
+                    results.append(ar)
+
+        return results if results else [SQLAnalysisResult()]
 
     def _analyze_with_regex(self, sql: str) -> SQLAnalysisResult:
         """Fallback анализ через regex."""

@@ -16,8 +16,9 @@ from generator.fqn_builder import FQNBuilder
 from analyzer.dag_parser import DAGParser
 from analyzer.sql_analyzer import SQLAnalyzer
 from analyzer.models import SQLAnalysisResult
-from analyzer.connection_resolver import ConnectionResolver
 from generator.omentity_generator import OMEntityGenerator
+from visualizer.diagram import DataFlowDiagram
+from test_against_samples import extract_existing_omentity
 
 
 class DAGHelperApp:
@@ -92,13 +93,25 @@ class DAGHelperApp:
         self.btn_analyze.pack(side=tk.RIGHT, padx=5)
 
         # Чекбокс принудительного режима
-        self.force_mode = tk.BooleanVar(value=False)
+        self.force_mode = tk.BooleanVar(value=True)
         self.chk_force = ttk.Checkbutton(
             top_frame,
             text="Принудительно (все задачи)",
             variable=self.force_mode
         )
         self.chk_force.pack(side=tk.RIGHT, padx=10)
+
+        # Вторая строка опций
+        options_frame = ttk.Frame(self.root, padding=(10, 0, 10, 5))
+        options_frame.pack(fill=tk.X)
+
+        self.compare_mode = tk.BooleanVar(value=True)
+        self.chk_compare = ttk.Checkbutton(
+            options_frame,
+            text="Выводить и сравнить имеющиеся OMEntity",
+            variable=self.compare_mode
+        )
+        self.chk_compare.pack(side=tk.LEFT, padx=5)
 
         # Метка с путём к файлу
         file_frame = ttk.Frame(self.root, padding=(10, 0, 10, 5))
@@ -228,13 +241,22 @@ class DAGHelperApp:
         # 1. Парсим DAG
         dag_result = dag_parser.parse_file(dag_path)
 
-        # 2. Анализируем SQL
+        # 1.5. Извлекаем существующие OMEntity (до очистки has_omentity)
+        existing_omentity = {}
+        if self.compare_mode.get():
+            existing_omentity = extract_existing_omentity(dag_path)
+
+        # 2. Временно убираем has_omentity
+        for task in dag_result.tasks:
+            task.has_omentity = False
+
+        # 3. Анализируем SQL
         sql_results = {}
         for sql_var, sql_code in dag_result.sql_variables.items():
             result = sql_analyzer.analyze(sql_code)
             sql_results[sql_var] = result
 
-        # 3. Связываем функции с SQL
+        # 4. Связываем функции с SQL
         func_sql_results = {}
         for func_name, func_info in dag_result.functions.items():
             combined = SQLAnalysisResult()
@@ -244,47 +266,19 @@ class DAGHelperApp:
             if combined.inlets or combined.outlets or combined.dictionaries:
                 func_sql_results[func_name] = combined
 
-        # 4. Генерируем OMEntity для ВСЕХ задач (принудительно)
-        resolver = ConnectionResolver(dag_result)
-        outputs = []
+        # 5. Генерируем через OMEntityGenerator
+        outputs = generator.generate_for_dag(dag_result, func_sql_results)
 
-        for task in dag_result.tasks:
-            # Принудительно сбрасываем флаг has_omentity
-            task.has_omentity = False
-
-            func_name = task.python_callable
-            if not func_name:
-                continue
-
-            conn_id, conn_source = resolver.resolve_for_function(func_name)
-            if not conn_id:
-                conn_id = "UNKNOWN"
-
-            sql_result = func_sql_results.get(func_name)
-            if not sql_result:
-                func_info = dag_result.functions.get(func_name)
-                if func_info:
-                    combined = SQLAnalysisResult()
-                    for sql_var in func_info.sql_variables:
-                        if sql_var in sql_results:
-                            combined = combined.merge(sql_results[sql_var])
-                    if combined.inlets or combined.outlets or combined.dictionaries:
-                        sql_result = combined
-
-            if not sql_result:
-                continue
-
-            output = generator._generate_for_task(task, conn_id, conn_source, sql_result)
-            outputs.append(output)
-
-        # 5. Форматируем вывод
         if not outputs:
             return self._format_no_results_force(dag_result)
 
-        return self._format_output_force(outputs, dag_result)
+        return self._format_output_force(outputs, dag_result, existing_omentity)
 
-    def _format_output_force(self, outputs, dag_result) -> str:
+    def _format_output_force(self, outputs, dag_result, existing_omentity=None) -> str:
         """Форматирует вывод для принудительного режима."""
+        if existing_omentity is None:
+            existing_omentity = {}
+        diagram = DataFlowDiagram()
         lines = []
         lines.append("# " + "=" * 65)
         lines.append(f"# DAG: {dag_result.dag_id or 'Unknown'}")
@@ -296,7 +290,104 @@ class DAGHelperApp:
         for output in outputs:
             lines.append(output.generated_code)
             lines.append("")
+
+            # Блоки сравнения с существующими OMEntity
+            if existing_omentity:
+                existing = existing_omentity.get(output.task_id)
+                lines.append(self._format_existing_omentity(existing))
+                lines.append("")
+                lines.append(self._format_difference(output, existing))
+                lines.append("")
+
+            # Диаграмма потоков данных
+            diag = diagram.render(output)
+            if diag:
+                lines.append("# " + "-" * 65)
+                lines.append("# Data flow diagram:")
+                for dline in diag.split("\n"):
+                    lines.append(f"# {dline}")
+                lines.append("# " + "-" * 65)
             lines.append("")
+
+        return "\n".join(lines)
+
+    def _format_existing_omentity(self, existing) -> str:
+        """Форматирует блок существующих OMEntity."""
+        lines = []
+        lines.append("# " + "-" * 65)
+        lines.append("# Existed OMEntity:")
+        lines.append("# " + "-" * 65)
+
+        if not existing or (not existing.inlets and not existing.outlets):
+            lines.append("# (no existing OMEntity)")
+            return "\n".join(lines)
+
+        lines.append("#")
+        if existing.inlets:
+            lines.append("# inlets:")
+            for e in existing.inlets:
+                key_part = f', key="{e.key}"' if e.key else ''
+                lines.append(f'#     OMEntity(entity=Entity.{e.entity_type}, fqn="{e.fqn}"{key_part})')
+        else:
+            lines.append("# inlets: []")
+
+        if existing.outlets:
+            lines.append("# outlets:")
+            for e in existing.outlets:
+                key_part = f', key="{e.key}"' if e.key else ''
+                lines.append(f'#     OMEntity(entity=Entity.{e.entity_type}, fqn="{e.fqn}"{key_part})')
+        else:
+            lines.append("# outlets: []")
+
+        return "\n".join(lines)
+
+    def _format_difference(self, output, existing) -> str:
+        """Форматирует блок различий между сгенерированными и существующими OMEntity."""
+        lines = []
+        lines.append("# " + "-" * 65)
+        lines.append("# Difference:")
+        lines.append("# " + "-" * 65)
+
+        if not existing or (not existing.inlets and not existing.outlets):
+            lines.append("# (nothing to compare — no existing OMEntity)")
+            return "\n".join(lines)
+
+        # Собираем множества FQN для сравнения
+        gen_inlet_fqns = {item.fqn for item in output.inlets}
+        gen_outlet_fqns = {item.fqn for item in output.outlets}
+        exist_inlet_fqns = {e.fqn for e in existing.inlets}
+        exist_outlet_fqns = {e.fqn for e in existing.outlets}
+
+        extra_inlets = gen_inlet_fqns - exist_inlet_fqns
+        missing_inlets = exist_inlet_fqns - gen_inlet_fqns
+        extra_outlets = gen_outlet_fqns - exist_outlet_fqns
+        missing_outlets = exist_outlet_fqns - gen_outlet_fqns
+
+        is_match = not extra_inlets and not missing_inlets and not extra_outlets and not missing_outlets
+
+        if is_match:
+            lines.append("# MATCH")
+            return "\n".join(lines)
+
+        lines.append("# MISMATCH")
+        lines.append("#")
+
+        if extra_inlets:
+            lines.append("# Extra inlets (generated, not in DAG):")
+            for fqn in sorted(extra_inlets):
+                lines.append(f"#     + {fqn}")
+        if missing_inlets:
+            lines.append("# Missing inlets (in DAG, not generated):")
+            for fqn in sorted(missing_inlets):
+                lines.append(f"#     - {fqn}")
+        if extra_outlets:
+            lines.append("# Extra outlets (generated, not in DAG):")
+            for fqn in sorted(extra_outlets):
+                lines.append(f"#     + {fqn}")
+        if missing_outlets:
+            lines.append("# Missing outlets (in DAG, not generated):")
+            for fqn in sorted(missing_outlets):
+                lines.append(f"#     - {fqn}")
 
         return "\n".join(lines)
 
@@ -342,7 +433,7 @@ class DAGHelperApp:
                     self.text_output.tag_add("string", f"{i}.{match.start()}", f"{i}.{match.end()}")
 
                 # Ключевые слова
-                for kw in ['OMEntity', 'Entity', 'TABLE', 'API', 'inlets', 'outlets', 'fqn', 'entity']:
+                for kw in ['OMEntity', 'Entity', 'TABLE', 'API', 'TOPIC', 'inlets', 'outlets', 'fqn', 'entity', 'key']:
                     start = 0
                     while True:
                         pos = line.find(kw, start)

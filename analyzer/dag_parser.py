@@ -44,13 +44,16 @@ class DAGParser:
         self._extract_tasks(tree)
         self._extract_dag_id(tree)
 
+        # Извлекаем cross-server вызовы ПЕРЕД линковкой SQL
+        self._extract_cross_server_calls(tree)
+
         # Связываем функции с SQL переменными через AST
+        # (после cross-server, чтобы исключить SQL переменные из copy_ch_to_ch_pipe)
         self._link_functions_to_sql(tree)
 
-        # Извлекаем API connections, bulk_dump tables и cross-server вызовы
+        # Извлекаем API connections и bulk_dump tables
         self._extract_api_usage(tree)
         self._extract_bulk_dump_tables(tree)
-        self._extract_cross_server_calls(tree)
 
         return self.result
 
@@ -125,16 +128,26 @@ class DAGParser:
     def _extract_tasks(self, tree: ast.Module):
         """Извлекает PythonOperator задачи."""
         for node in ast.walk(tree):
+            call = None
+            lineno = 0
+
             if isinstance(node, ast.Assign):
-                # Проверяем на вызов PythonOperator
+                # Assigned: task_var = PythonOperator(...)
                 if isinstance(node.value, ast.Call):
                     call = node.value
-                    func_name = self._get_call_name(call)
+                    lineno = node.lineno
+            elif isinstance(node, ast.Expr):
+                # Unassigned: PythonOperator(...)  (e.g. inside TaskGroup)
+                if isinstance(node.value, ast.Call):
+                    call = node.value
+                    lineno = node.lineno
 
-                    if func_name in ('PythonOperator', 'ShortCircuitOperator'):
-                        task_info = self._parse_operator_call(call, node.lineno)
-                        if task_info:
-                            self.result.tasks.append(task_info)
+            if call:
+                func_name = self._get_call_name(call)
+                if func_name in ('PythonOperator', 'ShortCircuitOperator'):
+                    task_info = self._parse_operator_call(call, lineno)
+                    if task_info:
+                        self.result.tasks.append(task_info)
 
     def _extract_dag_id(self, tree: ast.Module):
         """Извлекает dag_id из DAG(...)."""
@@ -310,6 +323,15 @@ class DAGParser:
             func_node = func_nodes[func_name]
             used_sql_vars = set()
 
+            # Собираем SQL переменные, используемые в cross-server вызовах —
+            # они обрабатываются отдельно с правильными connection_id
+            cross_server_sql_vars = set()
+            for cs_call in func_info.cross_server_calls:
+                if cs_call.take_data_var:
+                    cross_server_sql_vars.add(cs_call.take_data_var)
+                if cs_call.insert_data_var:
+                    cross_server_sql_vars.add(cs_call.insert_data_var)
+
             # Анализируем тело функции
             for node in ast.walk(func_node):
                 # Прямое использование SQL переменной
@@ -329,6 +351,9 @@ class DAGParser:
                                 for inner_arg in arg.args:
                                     if isinstance(inner_arg, ast.Name) and inner_arg.id in self.result.sql_variables:
                                         used_sql_vars.add(inner_arg.id)
+
+            # Исключаем SQL переменные из cross-server вызовов
+            used_sql_vars -= cross_server_sql_vars
 
             func_info.sql_variables = list(used_sql_vars)
 
@@ -434,25 +459,38 @@ class DAGParser:
 
     def _parse_copy_ch_to_ch_pipe(self, call: ast.Call) -> Optional[CrossServerCall]:
         """Парсит вызов copy_ch_to_ch_pipe и извлекает параметры."""
-        take_data = None
-        insert_data = None
+        take_data_var = None
+        take_data_inline = None
+        insert_data_var = None
+        insert_data_inline = None
         src_ch = None
         dst_ch = None
 
         for kw in call.keywords:
             if kw.arg == 'take_data':
-                take_data = self._resolve_value(kw.value)
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    take_data_inline = kw.value.value
+                elif isinstance(kw.value, ast.Name):
+                    take_data_var = kw.value.id
             elif kw.arg == 'insert_data':
-                insert_data = self._resolve_value(kw.value)
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    insert_data_inline = kw.value.value
+                elif isinstance(kw.value, ast.Name):
+                    insert_data_var = kw.value.id
             elif kw.arg == 'src_ch':
                 src_ch = self._resolve_value(kw.value)
             elif kw.arg == 'dst_ch':
                 dst_ch = self._resolve_value(kw.value)
 
-        if all([take_data, insert_data, src_ch, dst_ch]):
+        has_take = take_data_var or take_data_inline
+        has_insert = insert_data_var or insert_data_inline
+
+        if all([has_take, has_insert, src_ch, dst_ch]):
             return CrossServerCall(
-                take_data_var=take_data,
-                insert_data_var=insert_data,
+                take_data_var=take_data_var,
+                take_data_inline=take_data_inline,
+                insert_data_var=insert_data_var,
+                insert_data_inline=insert_data_inline,
                 src_connection=src_ch,
                 dst_connection=dst_ch
             )
