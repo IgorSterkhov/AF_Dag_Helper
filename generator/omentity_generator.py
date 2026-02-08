@@ -110,32 +110,53 @@ class OMEntityGenerator:
         if api_flow and (api_flow.inlets or api_flow.outlets):
             flows.append(api_flow)
 
-        # FLOW(s): Cross-server calls (каждый вызов — отдельный набор flow)
+        # FLOW(s): Cross-server calls
+        cs_flows = []
         if func_info and func_info.cross_server_calls and dag_result:
             cs_flows = self._build_cross_server_flows(
                 func_info, connection_id, dag_result, warnings
             )
-            flows.extend(cs_flows)
 
         # FLOW(s): SQL (per-statement)
         sql_flows = self._build_sql_flows(
             connection_id, sql_result, func_info, dag_result, task, warnings
         )
-        # Не добавляем SQL flow если cross-server уже покрыл те же таблицы
+
+        # Разделяем SQL flows: primary connection и other connections
+        # Порядок: SQL(primary) → cross-server → SQL(other)
+        sql_primary = []
+        sql_other = []
+
         if sql_flows:
             cs_inlet_fqns = set()
             cs_outlet_fqns = set()
-            for f in flows:
-                if f.flow_type == 'cross_server':
-                    cs_inlet_fqns.update(i.fqn for i in f.inlets)
-                    cs_outlet_fqns.update(o.fqn for o in f.outlets)
+            for f in cs_flows:
+                cs_inlet_fqns.update(i.fqn for i in f.inlets)
+                cs_outlet_fqns.update(o.fqn for o in f.outlets)
+
+            # Определяем server prefix из connection_id (через fqn_builder mapping)
+            primary_server = self.fqn_builder.get_server_name(connection_id)
 
             for sf in sql_flows:
-                # Проверяем что SQL flow не полностью покрыт cross-server
                 sf_inlet_fqns = {i.fqn for i in sf.inlets}
                 sf_outlet_fqns = {o.fqn for o in sf.outlets}
-                if not (sf_inlet_fqns <= cs_inlet_fqns and sf_outlet_fqns <= cs_outlet_fqns):
-                    flows.append(sf)
+                # Пропускаем SQL flow если cross-server уже покрыл те же таблицы
+                if sf_inlet_fqns <= cs_inlet_fqns and sf_outlet_fqns <= cs_outlet_fqns:
+                    continue
+                # Определяем connection по FQN первого элемента
+                all_fqns = list(sf_inlet_fqns | sf_outlet_fqns)
+                if all_fqns:
+                    first_server = all_fqns[0].split('.')[0] if '.' in all_fqns[0] else ''
+                    if first_server == primary_server:
+                        sql_primary.append(sf)
+                    else:
+                        sql_other.append(sf)
+                else:
+                    sql_primary.append(sf)
+
+        flows.extend(sql_primary)
+        flows.extend(cs_flows)
+        flows.extend(sql_other)
 
         # Назначаем key через KeyAssigner
         inlets, outlets = self.key_assigner.assign_keys(flows)
@@ -160,7 +181,8 @@ class OMEntityGenerator:
             inlets=inlets,
             outlets=outlets,
             warnings=warnings,
-            generated_code=code
+            generated_code=code,
+            flows=flows
         )
 
     def _build_api_flow(
@@ -332,7 +354,34 @@ class OMEntityGenerator:
                             source_description='dst_table from op_kwargs'
                         ))
 
+        # Merge flows с одинаковыми outlet-ами
+        if len(flows) > 1:
+            flows = self._merge_flows_by_outlet(flows)
+
         return flows
+
+    def _merge_flows_by_outlet(self, flows: List[DataFlowGroup]) -> List[DataFlowGroup]:
+        """Merge SQL flows that target the same outlet table(s)."""
+        merged = {}  # frozenset(outlet_fqns) -> DataFlowGroup
+        order = []   # preserve first-seen order
+
+        for flow in flows:
+            outlet_key = frozenset(item.fqn for item in flow.outlets)
+            if outlet_key in merged:
+                existing = merged[outlet_key]
+                for item in flow.inlets:
+                    if item not in existing.inlets:
+                        existing.inlets.append(item)
+            else:
+                merged[outlet_key] = DataFlowGroup(
+                    flow_type=flow.flow_type,
+                    inlets=list(flow.inlets),
+                    outlets=list(flow.outlets),
+                    source_description=flow.source_description
+                )
+                order.append(outlet_key)
+
+        return [merged[key] for key in order]
 
     def _sql_result_to_flow(
         self,
@@ -451,6 +500,16 @@ class OMEntityGenerator:
                         item = OMEntityItem(EntityType.TABLE, fqn)
                         if item not in inlets:
                             inlets.append(item)
+
+                    # Dictionaries из take_data SQL (dictGet)
+                    if self.include_dictget_as_inlets:
+                        for dict_ref in stmt_result.dictionaries:
+                            fqn = self.fqn_builder.build_fqn(
+                                src_conn, dict_ref.schema, dict_ref.table
+                            )
+                            item = OMEntityItem(EntityType.TABLE, fqn)
+                            if item not in inlets:
+                                inlets.append(item)
 
                     # Outlets из take_data (если есть INSERT — внутренний шаг)
                     if stmt_result.outlets:

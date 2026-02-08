@@ -1,7 +1,7 @@
 """SQL анализатор на базе sqlglot для ClickHouse."""
 
 import re
-from typing import List, Set, Optional
+from typing import Dict, List, Set, Optional
 import sqlglot
 from sqlglot import exp
 
@@ -345,7 +345,8 @@ class SQLAnalyzer:
             # Fallback: возвращаем один общий результат
             return [self.analyze(sql)]
 
-        # Первый проход: собираем temporary tables
+        # Первый проход: собираем temporary tables и их источники
+        _temp_table_sources: Dict[str, List[TableReference]] = {}
         for statement in statements:
             if statement is None:
                 continue
@@ -354,9 +355,20 @@ class SQLAnalyzer:
                 if table_expr:
                     table_name = self._get_table_name(table_expr)
                     if table_name:
-                        sql_text = statement.sql(dialect=self.dialect).lower()
-                        if 'temporary' in sql_text or 'temp ' in sql_text:
+                        is_temp = statement.find(exp.TemporaryProperty) is not None
+                        if not is_temp:
+                            sql_text = statement.sql(dialect=self.dialect).lower()
+                            is_temp = 'temporary' in sql_text or 'temp ' in sql_text
+                        if is_temp:
                             self._temp_tables.add(table_name)
+                            # Извлекаем источники из AS SELECT
+                            if statement.expression:
+                                source_result = SQLAnalysisResult()
+                                self._extract_from_tables(statement.expression, source_result)
+                                self._extract_dictget(statement.expression, source_result)
+                                _temp_table_sources[table_name] = (
+                                    source_result.inlets + source_result.dictionaries
+                                )
 
         # Второй проход: анализируем каждый statement
         for statement in statements:
@@ -366,8 +378,42 @@ class SQLAnalyzer:
             stmt_result = SQLAnalysisResult()
             self._analyze_statement(statement, stmt_result)
 
-            # Удаляем временные таблицы
-            stmt_result.inlets = [t for t in stmt_result.inlets if t.full_name not in self._temp_tables]
+            # Ищем ссылки на temp tables без схемы (они отфильтрованы _parse_table_expression)
+            for table in statement.find_all(exp.Table):
+                table_name = table.name
+                schema_name = table.db if hasattr(table, 'db') and table.db else None
+                if not schema_name and table_name in self._temp_tables:
+                    sources = _temp_table_sources.get(table_name, [])
+                    for src in sources:
+                        src_name = src.full_name
+                        if src_name in self._temp_tables:
+                            nested = _temp_table_sources.get(src_name, [])
+                            for ns in nested:
+                                if ns not in stmt_result.inlets:
+                                    stmt_result.inlets.append(ns)
+                        else:
+                            if src not in stmt_result.inlets:
+                                stmt_result.inlets.append(src)
+
+            # Резолвим временные таблицы: подставляем их источники
+            resolved_inlets = []
+            for t in stmt_result.inlets:
+                if t.full_name in self._temp_tables:
+                    sources = _temp_table_sources.get(t.full_name, [])
+                    for src in sources:
+                        if src.full_name in self._temp_tables:
+                            # Рекурсия: источник — тоже temp table
+                            nested = _temp_table_sources.get(src.full_name, [])
+                            for ns in nested:
+                                if ns not in resolved_inlets:
+                                    resolved_inlets.append(ns)
+                        else:
+                            if src not in resolved_inlets:
+                                resolved_inlets.append(src)
+                else:
+                    if t not in resolved_inlets:
+                        resolved_inlets.append(t)
+            stmt_result.inlets = resolved_inlets
             stmt_result.outlets = [t for t in stmt_result.outlets if t.full_name not in self._temp_tables]
 
             # Убираем дубликаты

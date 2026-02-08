@@ -2,22 +2,19 @@
 
 from typing import List, Optional
 
-from analyzer.models import OMEntityOutput, OMEntityItem
+from analyzer.models import OMEntityOutput, OMEntityItem, DataFlowGroup, EntityType
 
 
 class DataFlowDiagram:
     """Генератор текстовых диаграмм потоков данных."""
 
-    MAX_HORIZONTAL_LINE = 120
-    MAX_HORIZONTAL_ENTITIES = 4
-
     def render(self, output: OMEntityOutput, orientation: str = 'auto') -> str:
         """
-        Рендерит диаграмму для одной задачи.
+        Рендерит диаграмму для одной задачи — последовательный пайплайн.
 
         Args:
-            output: OMEntityOutput с inlets/outlets
-            orientation: 'horizontal', 'vertical', 'auto'
+            output: OMEntityOutput с inlets/outlets и flows
+            orientation: не используется (оставлен для совместимости)
 
         Returns:
             Текстовая диаграмма
@@ -25,47 +22,22 @@ class DataFlowDiagram:
         if not output.inlets and not output.outlets:
             return ""
 
-        # Группируем по key
-        groups = self._group_by_key(output.inlets, output.outlets)
-
-        # Определяем ориентацию
-        if orientation == 'auto':
-            orientation = self._detect_orientation(groups)
-
         lines = []
         title = f"Task: {output.task_id}"
         sep = "=" * max(len(title) + 4, 50)
         lines.append(title)
         lines.append(sep)
 
-        if not groups:
-            # Нет key-групп — простой вывод
-            lines.extend(
-                self._render_flat(output.inlets, output.outlets, orientation)
-            )
+        if output.flows:
+            lines.extend(self._render_sequential_flows(
+                output.flows, output.connection_id
+            ))
         else:
-            has_keyed = any(k is not None for k in groups)
-            if not has_keyed:
-                # Все без key — простой вывод
-                all_inlets = []
-                all_outlets = []
-                for k, (ins, outs) in groups.items():
-                    all_inlets.extend(ins)
-                    all_outlets.extend(outs)
-                lines.extend(
-                    self._render_flat(all_inlets, all_outlets, orientation)
-                )
-            else:
-                for key in sorted(groups.keys(), key=lambda k: (k is None, k or '')):
-                    inlets, outlets = groups[key]
-                    if key is not None:
-                        lines.extend(
-                            self._render_group(key, inlets, outlets, orientation)
-                        )
-                    else:
-                        lines.extend(
-                            self._render_flat(inlets, outlets, orientation)
-                        )
+            # Fallback: один шаг из всех inlets/outlets
+            all_inlets = list(dict.fromkeys(output.inlets))
+            all_outlets = list(dict.fromkeys(output.outlets))
+            lines.append("")
+            lines.extend(self._render_step(all_inlets, all_outlets, None))
 
         return "\n".join(lines)
 
@@ -75,7 +47,7 @@ class DataFlowDiagram:
 
         Args:
             outputs: Список OMEntityOutput
-            orientation: 'horizontal', 'vertical', 'auto'
+            orientation: не используется (оставлен для совместимости)
 
         Returns:
             Текстовые диаграммы для всех задач
@@ -87,215 +59,176 @@ class DataFlowDiagram:
                 diagrams.append(diagram)
         return "\n\n".join(diagrams)
 
-    def _group_by_key(
-        self, inlets: List[OMEntityItem], outlets: List[OMEntityItem]
-    ) -> dict:
-        """Группирует inlets/outlets по key."""
-        groups = {}
-        for item in inlets:
-            key = item.key
-            if key not in groups:
-                groups[key] = ([], [])
-            groups[key][0].append(item)
-        for item in outlets:
-            key = item.key
-            if key not in groups:
-                groups[key] = ([], [])
-            groups[key][1].append(item)
-        return groups
+    # ─── Sequential flow rendering ──────────────────────────────────
 
-    def _detect_orientation(self, groups: dict) -> str:
-        """Определяет ориентацию: horizontal или vertical."""
-        for key, (inlets, outlets) in groups.items():
-            total_entities = len(inlets) + len(outlets)
-            if total_entities > self.MAX_HORIZONTAL_ENTITIES:
-                return 'vertical'
-
-            # Проверяем длину горизонтальной строки
-            line = self._format_horizontal_line(key, inlets, outlets)
-            if len(line) > self.MAX_HORIZONTAL_LINE:
-                return 'vertical'
-
-        return 'horizontal'
-
-    def _format_horizontal_line(
+    def _render_sequential_flows(
         self,
-        key: Optional[str],
-        inlets: List[OMEntityItem],
-        outlets: List[OMEntityItem]
-    ) -> str:
-        """Формирует одну горизонтальную строку для оценки длины."""
-        parts = []
-        if key is not None:
-            parts.append(f"[{key}] ")
-        else:
-            parts.append("  ")
-
-        inlet_strs = [self._short_name(i) for i in inlets]
-        outlet_strs = [self._short_name(o) for o in outlets]
-
-        line = "".join(parts)
-        line += ", ".join(inlet_strs)
-        if inlets and outlets:
-            line += " --> "
-        line += ", ".join(outlet_strs)
-        return line
-
-    def _short_name(self, item: OMEntityItem) -> str:
-        """Сокращённое имя entity для горизонтальной диаграммы."""
-        fqn = item.fqn
-        # Убираем серверный префикс для компактности
-        parts = fqn.split('.')
-        if len(parts) >= 3:
-            name = ".".join(parts[1:])
-        else:
-            name = fqn
-
-        if item.entity_type.value != "TABLE":
-            return f"{name} ({item.entity_type.value})"
-        return name
-
-    def _full_name(self, item: OMEntityItem) -> str:
-        """Имя entity без типа (тип уже в префиксе вертикальной диаграммы)."""
-        parts = item.fqn.split('.')
-        if len(parts) >= 3:
-            return ".".join(parts[1:])
-        return item.fqn
-
-    def _render_flat(
-        self,
-        inlets: List[OMEntityItem],
-        outlets: List[OMEntityItem],
-        orientation: str
+        flows: List[DataFlowGroup],
+        default_connection: str
     ) -> List[str]:
-        """Рендерит без key-группы."""
-        if orientation == 'horizontal':
-            return self._render_horizontal(None, inlets, outlets)
-        else:
-            return self._render_vertical(None, inlets, outlets)
-
-    def _render_group(
-        self,
-        key: str,
-        inlets: List[OMEntityItem],
-        outlets: List[OMEntityItem],
-        orientation: str
-    ) -> List[str]:
-        """Рендерит одну key-группу."""
-        if orientation == 'horizontal':
-            return self._render_horizontal(key, inlets, outlets)
-        else:
-            return self._render_vertical(key, inlets, outlets)
-
-    def _make_box(self, title: str, items: List[str], connector: str = 'none') -> List[str]:
-        """
-        Строит текстовый бокс с рамкой.
-
-        Args:
-            title: заголовок бокса (INLETS / OUTLETS)
-            items: строки содержимого
-            connector: 'bottom' — ┬ в нижней границе, 'none' — обычная рамка
-        """
-        all_content = [title] + [f"  {item}" for item in items]
-        width = max(len(s) for s in all_content) + 2  # padding
-
+        """Рендерит последовательные шаги потока данных."""
         lines = []
-        lines.append(f"┌{'─' * width}┐")
-        for s in all_content:
-            lines.append(f"│ {s:<{width - 1}}│")
+        # Фильтруем: пропускаем DDL-шаги (только inlets без outlets)
+        non_empty = [f for f in flows if f.inlets and f.outlets]
 
-        if connector == 'bottom':
-            half = width // 2
-            lines.append(f"└{'─' * half}┬{'─' * (width - half - 1)}┘")
-        else:
-            lines.append(f"└{'─' * width}┘")
+        for i, flow in enumerate(non_empty):
+            step_num = i + 1
+
+            # Заголовок шага
+            lines.append("")
+            lines.append(f"  [{step_num}] {flow.source_description}")
+            lines.append(f"  {'─' * 38}")
+
+            # Рендер шага
+            lines.extend(self._render_step(
+                flow.inlets, flow.outlets, default_connection
+            ))
+
+            # Вертикальный коннектор к следующему шагу
+            if i < len(non_empty) - 1:
+                lines.extend(self._render_vertical_connector())
 
         return lines
 
-    def _render_boxes_side_by_side(
+    def _render_step(
         self,
-        left: List[str],
-        right: List[str],
-        arrow: str = "───▶"
+        inlets: List[OMEntityItem],
+        outlets: List[OMEntityItem],
+        default_connection: Optional[str]
     ) -> List[str]:
-        """Рендерит два бокса горизонтально рядом со стрелкой между ними."""
-        left_width = max(len(line) for line in left) if left else 0
-        max_h = max(len(left), len(right))
+        """
+        Рендерит один шаг потока: inlets слева, стрелки, outlets справа.
 
-        # Выравниваем высоты
-        while len(left) < max_h:
-            left.append(" " * left_width)
-        while len(right) < max_h:
-            right.append("")
+        Формат:
+          inlet_1  ──┐
+          inlet_2  ──┼──▶ outlet_1
+          inlet_3  ──┘
 
-        # Стрелка на средней строке
-        mid = max_h // 2
-        spacer = "  "
+        Или с несколькими outlets:
+          inlet_1  ──┐     ┌──▶ outlet_1
+          inlet_2  ──┼─────┤
+          inlet_3  ──┘     └──▶ outlet_2
+        """
+        indent = "  "
+
+        inlet_names = [self._display_name(i, default_connection) for i in inlets]
+        outlet_names = [self._display_name(o, default_connection) for o in outlets]
+
+        # Только inlets (без outlets)
+        if not outlet_names:
+            return [f"{indent}{name}" for name in inlet_names]
+
+        # Только outlets (без inlets)
+        if not inlet_names:
+            return [f"{indent}{'':>30}  ──▶ {name}" for name in outlet_names]
+
+        n_in = len(inlet_names)
+        n_out = len(outlet_names)
+        max_inlet_len = max(len(n) for n in inlet_names)
+
+        # Специальный случай: 1 inlet, 1 outlet — прямая стрелка
+        if n_in == 1 and n_out == 1:
+            padded = inlet_names[0].ljust(max_inlet_len)
+            return [f"{indent}{padded}  ────▶ {outlet_names[0]}"]
+
+        # Общий случай: строим скобки
+        total_rows = max(n_in, n_out)
+        in_offset = max(0, (total_rows - n_in) // 2)
+        out_offset = max(0, (total_rows - n_out) // 2)
+
+        # Строка, где горизонтальная труба соединяет скобки
+        in_mid = in_offset + (n_in - 1) // 2
+        out_mid = out_offset + (n_out - 1) // 2
+        connect_row = (in_mid + out_mid) // 2
+
+        # Если connect_row вне обеих скобок — подвинуть
+        if connect_row < in_offset:
+            connect_row = in_offset
+        if connect_row > in_offset + n_in - 1:
+            connect_row = in_offset + n_in - 1
 
         result = []
-        for i in range(max_h):
-            l = left[i].ljust(left_width)
-            r = right[i]
-            if i == mid:
-                result.append(f"{l}{spacer}{arrow}{spacer}{r}")
+        for row in range(total_rows):
+            in_idx = row - in_offset
+            out_idx = row - out_offset
+
+            # === Левая часть: inlet + скобка ===
+            is_connect = (row == connect_row)
+            if 0 <= in_idx < n_in:
+                padded = inlet_names[in_idx].ljust(max_inlet_len)
+                if n_in == 1:
+                    left = f"{indent}{padded}  ──"
+                elif in_idx == 0:
+                    # ┐ = угол (лево+вниз), ┬ = тройник (лево+вниз+право)
+                    ch = "┬" if is_connect else "┐"
+                    left = f"{indent}{padded}  ──{ch}"
+                elif in_idx == n_in - 1:
+                    # ┘ = угол (лево+вверх), ┴ = тройник (лево+вверх+право)
+                    ch = "┴" if is_connect else "┘"
+                    left = f"{indent}{padded}  ──{ch}"
+                else:
+                    # ┤ = тройник (лево+вверх+вниз), ┼ = крест (все 4)
+                    ch = "┼" if is_connect else "┤"
+                    left = f"{indent}{padded}  ──{ch}"
             else:
-                result.append(f"{l}{' ' * (len(spacer) + len(arrow) + len(spacer))}{r}")
+                space = " " * max_inlet_len
+                in_first = in_offset
+                in_last = in_offset + n_in - 1
+                if n_in > 1 and in_first < row < in_last:
+                    left = f"{indent}{space}    │"
+                else:
+                    left = f"{indent}{space}     "
+
+            # === Средняя часть: горизонтальная труба ===
+            in_active = in_offset <= row <= in_offset + n_in - 1
+            out_active = out_offset <= row <= out_offset + n_out - 1
+            out_first = out_offset
+            out_last = out_offset + n_out - 1
+
+            if row == connect_row:
+                mid = "─────"
+            elif in_active and out_active:
+                mid = "     "
+            elif not in_active and out_active and out_first < row < out_last:
+                mid = "     "
+            else:
+                mid = "     "
+
+            # === Правая часть: скобка + outlet ===
+            if 0 <= out_idx < n_out:
+                if n_out == 1:
+                    right = f"──▶ {outlet_names[out_idx]}"
+                elif out_idx == 0:
+                    ch = "┬" if is_connect else "┌"
+                    right = f"{ch}──▶ {outlet_names[out_idx]}"
+                elif out_idx == n_out - 1:
+                    ch = "┴" if is_connect else "└"
+                    right = f"{ch}──▶ {outlet_names[out_idx]}"
+                else:
+                    ch = "┼" if is_connect else "├"
+                    right = f"{ch}──▶ {outlet_names[out_idx]}"
+            else:
+                # Вертикальная черта outlet-скобки если мы между первым и последним
+                if n_out > 1 and out_first <= row <= out_last:
+                    right = "│"
+                else:
+                    right = ""
+
+            result.append(f"{left}{mid}{right}")
 
         return result
 
-    def _render_horizontal(
-        self,
-        key: Optional[str],
-        inlets: List[OMEntityItem],
-        outlets: List[OMEntityItem]
-    ) -> List[str]:
-        """Горизонтальный рендеринг: боксы слева направо со стрелками."""
-        lines = []
-        if key is not None:
-            lines.append(f"  [{key}]")
+    def _render_vertical_connector(self) -> List[str]:
+        """Вертикальная стрелка между шагами."""
+        pad = " " * 40
+        return [f"{pad}│", f"{pad}▼"]
 
-        inlet_items = [self._short_name(i) for i in inlets] if inlets else ["(none)"]
-        outlet_items = [self._short_name(o) for o in outlets] if outlets else ["(none)"]
+    # ─── Display name helpers ───────────────────────────────────────
 
-        left_box = self._make_box("INLETS", inlet_items)
-        right_box = self._make_box("OUTLETS", outlet_items)
-
-        box_lines = self._render_boxes_side_by_side(left_box, right_box)
-        for bl in box_lines:
-            lines.append(f"  {bl}")
-
-        return lines
-
-    def _render_vertical(
-        self,
-        key: Optional[str],
-        inlets: List[OMEntityItem],
-        outlets: List[OMEntityItem]
-    ) -> List[str]:
-        """Вертикальный рендеринг: боксы сверху вниз со стрелками."""
-        lines = []
-        indent = "  "
-
-        if key is not None:
-            lines.append(f"{indent}[{key}]")
-
-        inlet_items = [f"{item.entity_type.value}: {self._full_name(item)}" for item in inlets] if inlets else ["(none)"]
-        outlet_items = [f"{item.entity_type.value}: {self._full_name(item)}" for item in outlets] if outlets else ["(none)"]
-
-        # Бокс inlets с коннектором внизу
-        inlet_box = self._make_box("INLETS", inlet_items, connector='bottom')
-        box_width = max(len(line) for line in inlet_box)
-        for bl in inlet_box:
-            lines.append(f"{indent}{bl}")
-
-        # Стрелка вниз (по центру бокса)
-        center = box_width // 2 + 1
-        lines.append(f"{indent}{' ' * center}│")
-        lines.append(f"{indent}{' ' * center}▼")
-
-        # Бокс outlets
-        outlet_box = self._make_box("OUTLETS", outlet_items)
-        for bl in outlet_box:
-            lines.append(f"{indent}{bl}")
-
-        return lines
+    def _display_name(
+        self, item: OMEntityItem, default_connection: Optional[str]
+    ) -> str:
+        """Полный FQN для всех entity (как в OMEntity)."""
+        if item.entity_type != EntityType.TABLE:
+            return f"{item.fqn} ({item.entity_type.value})"
+        return item.fqn

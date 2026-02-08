@@ -169,6 +169,24 @@ class DAGHelperApp:
         """Привязывает обработчики событий."""
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Ctrl+C / Ctrl+A по keycode (работает в любой раскладке на Windows)
+        if sys.platform == 'win32':
+            self.text_output.bind('<Control-KeyPress>', self._on_ctrl_key)
+
+    def _on_ctrl_key(self, event):
+        """Обработка Ctrl+key по keycode для любой раскладки."""
+        if event.keycode == 67:  # C
+            try:
+                sel = self.text_output.get(tk.SEL_FIRST, tk.SEL_LAST)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(sel)
+            except tk.TclError:
+                pass  # Нет выделения
+            return 'break'
+        elif event.keycode == 65:  # A
+            self.text_output.tag_add(tk.SEL, '1.0', tk.END)
+            return 'break'
+
     def _on_close(self):
         """Обработчик закрытия окна."""
         # Сохраняем размер окна

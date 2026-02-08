@@ -161,3 +161,4 @@ class OMEntityOutput:
     outlets: List[OMEntityItem] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     generated_code: str = ""
+    flows: List[DataFlowGroup] = field(default_factory=list)
