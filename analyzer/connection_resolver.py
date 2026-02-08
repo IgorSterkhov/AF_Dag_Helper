@@ -48,6 +48,34 @@ class ConnectionResolver:
 
         return None, "unknown"
 
+    def resolve_for_sql_variable(self, func_name: str, sql_var: str) -> Tuple[Optional[str], str]:
+        """
+        Determines connection ID for a specific SQL variable within a function.
+
+        Uses hook-to-SQL-var mapping from AST analysis. Falls back to
+        function-level connection if no per-variable mapping exists.
+
+        Args:
+            func_name: Function name
+            sql_var: SQL variable name
+
+        Returns:
+            (connection_id, source) where source: "hook_analysis", "decorator", etc.
+        """
+        func_info = self.dag_result.functions.get(func_name)
+        if not func_info:
+            return None, "unknown"
+
+        # Check sql_var_connections first (from hook analysis)
+        if sql_var in func_info.sql_var_connections:
+            conn_var = func_info.sql_var_connections[sql_var]
+            if conn_var in self.dag_result.connection_variables:
+                return self.dag_result.connection_variables[conn_var], "hook_analysis"
+            return conn_var, "hook_analysis"
+
+        # Fallback to function-level connection
+        return self.resolve_for_function(func_name)
+
     def resolve_remote_connection(self, remote_prefix: str) -> str:
         """
         Определяет connection для remote_* таблиц.

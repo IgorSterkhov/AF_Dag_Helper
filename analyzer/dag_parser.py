@@ -120,8 +120,15 @@ class DAGParser:
                     # Проверяем на @with_db
                     if dec_name == 'with_db' and dec_args:
                         conn_id, conn_alias = self._parse_with_db_args(dec_args)
-                        func_info.connection_id = conn_id
-                        func_info.connection_alias = conn_alias
+                        func_info.with_db_connections.append((conn_id or '', conn_alias or ''))
+                        # First decorator = primary connection (backward compat)
+                        if func_info.connection_id is None:
+                            func_info.connection_id = conn_id
+                            func_info.connection_alias = conn_alias
+
+                # Map hook params → connections by alias matching
+                if len(func_info.with_db_connections) > 1:
+                    self._map_hooks_to_connections(node, func_info)
 
                 self.result.functions[node.name] = func_info
 
@@ -284,6 +291,23 @@ class DAGParser:
 
         return conn_id, alias
 
+    def _map_hooks_to_connections(self, func_node: ast.FunctionDef, func_info: FunctionInfo):
+        """Maps function hook parameters to @with_db connections by alias matching.
+
+        Convention: @with_db(CONN, 'alias') injects a hook param named '<alias>_hook'.
+        We match param names containing the alias to the corresponding connection.
+        """
+        # Get function parameter names (excluding **kwargs, *args)
+        func_params = [arg.arg for arg in func_node.args.args]
+
+        for conn_var, alias in func_info.with_db_connections:
+            if not alias:
+                continue
+            # Find param(s) that contain the alias (e.g. 'ch6' matches 'ch6_hook', 'ch6_curs')
+            for param in func_params:
+                if alias in param:
+                    func_info.hook_to_connection[param] = conn_var
+
     def _get_call_name(self, call: ast.Call) -> str:
         """Получает имя вызываемой функции."""
         if isinstance(call.func, ast.Name):
@@ -342,15 +366,25 @@ class DAGParser:
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     method_name = node.func.attr
                     if method_name in ('exec', 'exec_with_log', 'on_cluster'):
+                        # Get the hook object name (e.g. 'ch6_hook' from ch6_hook.exec_with_log(...))
+                        hook_name = None
+                        if isinstance(node.func.value, ast.Name):
+                            hook_name = node.func.value.id
+
                         # Проверяем аргументы вызова
                         for arg in node.args:
                             if isinstance(arg, ast.Name) and arg.id in self.result.sql_variables:
                                 used_sql_vars.add(arg.id)
+                                # Track which hook executes this SQL var
+                                if hook_name and hook_name in func_info.hook_to_connection:
+                                    func_info.sql_var_connections[arg.id] = func_info.hook_to_connection[hook_name]
                             # Также проверяем ast.Call внутри (например lambda или другая функция)
                             elif isinstance(arg, ast.Call):
                                 for inner_arg in arg.args:
                                     if isinstance(inner_arg, ast.Name) and inner_arg.id in self.result.sql_variables:
                                         used_sql_vars.add(inner_arg.id)
+                                        if hook_name and hook_name in func_info.hook_to_connection:
+                                            func_info.sql_var_connections[inner_arg.id] = func_info.hook_to_connection[hook_name]
 
             # Исключаем SQL переменные из cross-server вызовов
             used_sql_vars -= cross_server_sql_vars

@@ -1,7 +1,7 @@
 """Модели данных для анализатора DAG."""
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from enum import Enum
 
 
@@ -83,8 +83,14 @@ class FunctionInfo:
     """Информация о Python функции в DAG."""
     name: str
     decorators: List[str] = field(default_factory=list)
-    connection_id: Optional[str] = None
+    connection_id: Optional[str] = None          # first/primary connection (backward compat)
     connection_alias: Optional[str] = None
+    # All @with_db decorators in order: [(conn_var, alias), ...]
+    with_db_connections: List[Tuple[str, str]] = field(default_factory=list)
+    # Maps hook param name → conn variable name, e.g. {'ch6_hook': 'CH6_CONN'}
+    hook_to_connection: Dict[str, str] = field(default_factory=dict)
+    # Maps SQL var name → conn variable name (via hook analysis)
+    sql_var_connections: Dict[str, str] = field(default_factory=dict)
     sql_variables: List[str] = field(default_factory=list)
     api_connections: List[str] = field(default_factory=list)
     bulk_dump_tables: List[tuple] = field(default_factory=list)  # [('value'|'param', table_name), ...]

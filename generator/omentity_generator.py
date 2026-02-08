@@ -255,22 +255,36 @@ class OMEntityGenerator:
                     flows.append(flow)
             return flows
 
-        # Пробуем per-statement анализ
-        per_stmt_results = []
+        # Пробуем per-statement анализ с per-variable connection
+        per_stmt_results = []  # list of (conn_id, stmt_result)
         for sql_var in func_info.sql_variables:
+            # Resolve connection per SQL variable (may differ from function-level)
+            var_conn = connection_id  # default
+            if sql_var in func_info.sql_var_connections:
+                conn_var = func_info.sql_var_connections[sql_var]
+                if dag_result and conn_var in dag_result.connection_variables:
+                    var_conn = dag_result.connection_variables[conn_var]
+
             sql_code = dag_result.sql_variables.get(sql_var)
             if sql_code:
                 stmt_results = self.sql_analyzer.analyze_per_statement(sql_code)
-                per_stmt_results.extend(stmt_results)
+                for stmt in stmt_results:
+                    per_stmt_results.append((var_conn, stmt))
 
         if per_stmt_results and len(per_stmt_results) > 1:
-            # Несколько statement'ов — каждый в отдельный flow
-            for stmt_result in per_stmt_results:
-                flow = self._sql_result_to_flow(connection_id, stmt_result, warnings)
+            # Несколько statement'ов — каждый в отдельный flow с правильным connection
+            for var_conn, stmt_result in per_stmt_results:
+                flow = self._sql_result_to_flow(var_conn, stmt_result, warnings)
                 if flow:
                     flows.append(flow)
+        elif per_stmt_results and len(per_stmt_results) == 1:
+            # Один statement — используем его connection
+            var_conn, stmt_result = per_stmt_results[0]
+            flow = self._sql_result_to_flow(var_conn, stmt_result, warnings)
+            if flow:
+                flows.append(flow)
         elif sql_result and (sql_result.inlets or sql_result.outlets):
-            # Один statement или fallback — один flow
+            # Fallback — один flow с function-level connection
             flow = self._sql_result_to_flow(connection_id, sql_result, warnings)
             if flow:
                 flows.append(flow)
