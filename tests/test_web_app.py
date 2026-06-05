@@ -71,6 +71,36 @@ class WebAppTest(unittest.TestCase):
         panels = [elements[str(panel_id)] for panel_id in panel_ids]
         self.assertTrue(all(panel.get("children") for panel in panels))
 
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_result_area_uses_single_scroll_layout(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        main_rows = [
+            element for element in elements.values()
+            if "web-main" in element.get("class", [])
+        ]
+        self.assertEqual(len(main_rows), 1)
+        self.assertIn("overflow-hidden", main_rows[0]["class"])
+
+        result_panes = [
+            element for element in elements.values()
+            if "result-pane" in element.get("class", [])
+        ]
+        self.assertEqual(len(result_panes), 1)
+        self.assertIn("min-h-0", result_panes[0]["class"])
+
+        result_panels = [
+            element for element in elements.values()
+            if "result-panels" in element.get("class", [])
+        ]
+        self.assertEqual(len(result_panels), 1)
+
+        panel_ids = result_panels[0]["children"]
+        panels = [elements[str(panel_id)] for panel_id in panel_ids]
+        self.assertTrue(all("result-tab-panel" in panel.get("class", []) for panel in panels))
+
 
 if __name__ == "__main__":
     unittest.main()

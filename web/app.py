@@ -51,8 +51,53 @@ def create_ui():
     ui.add_head_html(
         """
         <style>
-          .nicegui-content { max-width: none; }
-          .result-editor .cm-editor { min-height: 62vh; }
+          .nicegui-content {
+            max-width: none;
+            height: calc(100vh - 56px);
+            overflow: hidden;
+          }
+          .web-main {
+            height: calc(100vh - 56px);
+            min-height: 0;
+            overflow: hidden;
+          }
+          .source-pane {
+            height: 100%;
+            min-height: 0;
+            overflow: auto;
+          }
+          .result-pane {
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+          }
+          .result-panels {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: hidden;
+          }
+          .result-tab-panel {
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+            padding: 8px 0 0;
+          }
+          .result-editor {
+            height: 100%;
+            min-height: 0;
+          }
+          .result-editor .cm-editor {
+            height: 100%;
+            min-height: 0;
+          }
+          .result-editor .cm-scroller {
+            overflow: auto;
+          }
+          .diagram-container {
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+          }
         </style>
         """
     )
@@ -84,8 +129,8 @@ def create_ui():
         ui.label("FastAPI + NiceGUI").classes("text-caption")
         ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round").tooltip("Справка")
 
-    with ui.row().classes("w-full no-wrap items-start q-pa-md"):
-        with ui.card().classes("w-1/3 min-w-[360px]"):
+    with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):
+        with ui.card().classes("source-pane w-1/3 min-w-[360px]"):
             ui.label("Source").classes("text-h6")
             with ui.tabs().classes("w-full") as source_tabs:
                 server_tab = ui.tab("server", label="Server file")
@@ -123,7 +168,7 @@ def create_ui():
                 copy_btn = ui.button("Copy", icon="content_copy")
                 download_btn = ui.button("Download", icon="download")
 
-        with ui.column().classes("w-2/3"):
+        with ui.column().classes("result-pane w-2/3 min-h-0 overflow-hidden"):
             summary = ui.markdown("Select a source and run analysis.")
             with ui.tabs().classes("w-full") as result_tabs:
                 generated_tab = ui.tab("Generated OMEntity")
@@ -132,16 +177,16 @@ def create_ui():
                 graph_tab = ui.tab("Interactive Diagram")
                 warnings_tab = ui.tab("Warnings")
 
-            with ui.tab_panels(result_tabs, value=generated_tab).classes("w-full"):
-                with ui.tab_panel(generated_tab):
+            with ui.tab_panels(result_tabs, value=generated_tab).classes("result-panels w-full"):
+                with ui.tab_panel(generated_tab).classes("result-tab-panel"):
                     generated = ui.codemirror("", language="Python").classes("w-full result-editor")
-                with ui.tab_panel(diff_tab):
+                with ui.tab_panel(diff_tab).classes("result-tab-panel"):
                     diff = ui.codemirror("", language="Markdown").classes("w-full result-editor")
-                with ui.tab_panel(text_diagram_tab):
+                with ui.tab_panel(text_diagram_tab).classes("result-tab-panel"):
                     text_diagram = ui.codemirror("", language="Markdown").classes("w-full result-editor")
-                with ui.tab_panel(graph_tab):
-                    diagram_html = ui.html("", sanitize=False).classes("w-full")
-                with ui.tab_panel(warnings_tab):
+                with ui.tab_panel(graph_tab).classes("result-tab-panel"):
+                    diagram_html = ui.html("", sanitize=False).classes("diagram-container w-full")
+                with ui.tab_panel(warnings_tab).classes("result-tab-panel"):
                     warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
 
     def resolve_current_dag_path() -> Path:
@@ -180,7 +225,7 @@ def create_ui():
                 html = CytoscapeViewer()._build_html(result.graph_data, f"Lineage: {result.dag_id}")
                 srcdoc = html_lib.escape(html, quote=True)
                 diagram_html.set_content(
-                    f'<iframe srcdoc="{srcdoc}" style="width:100%;height:70vh;border:1px solid #ddd;border-radius:6px;"></iframe>'
+                    f'<iframe srcdoc="{srcdoc}" style="width:100%;height:100%;border:1px solid #ddd;border-radius:6px;"></iframe>'
                 )
             else:
                 diagram_html.set_content("<p>No graph data available.</p>")
