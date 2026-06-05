@@ -189,7 +189,11 @@ def create_ui():
     download_btn.on_click(download_generated)
 
 
-create_ui()
+@ui.page("/")
+def index():
+    create_ui()
+
+
 ui.run_with(app, title="AF DAGs Helper", language="ru")
 
 
