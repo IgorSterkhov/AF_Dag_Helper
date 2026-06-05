@@ -18,10 +18,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from visualizer.cytoscape_viewer import CytoscapeViewer  # noqa: E402
 from web.analysis_service import DAGAnalysisRequest, DAGAnalysisService  # noqa: E402
+from web.auth import BasicAuthMiddleware  # noqa: E402
 from web.server_files import ServerFileBrowser  # noqa: E402
 
 
 app = FastAPI(title="AF DAGs Helper")
+app.add_middleware(BasicAuthMiddleware)
 
 
 @app.get("/health")

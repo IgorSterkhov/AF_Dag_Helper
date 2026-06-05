@@ -43,10 +43,12 @@ python gui\app.py
 ### 3. Запуск Web UI
 
 ```cmd
+set AF_DAGS_HELPER_AUTH_USER=admin
+set AF_DAGS_HELPER_AUTH_PASSWORD=change-me
 python -m web.app --host 127.0.0.1 --port 8000
 ```
 
-Открыть в браузере: `http://127.0.0.1:8000`.
+Открыть в браузере: `http://127.0.0.1:8000`, логин/пароль берутся из переменных окружения. `/health` остаётся доступен без авторизации для мониторинга.
 
 ### 4. Установка зависимостей (если venv пустой)
 
@@ -68,6 +70,18 @@ scripts/deploy_ivm1.sh
 ```
 
 Скрипт разворачивает `master` в `~/dev/af_dags_helper` на `ivm-1`, создаёт `.venv`, устанавливает зависимости и перезапускает `af-dags-helper.service` на порту `8000`.
+
+При первом деплое создаётся файл `/home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env` с логином `admin` и случайным паролем для web UI. Посмотреть текущие credentials:
+
+```bash
+ssh ivm-1 'cat /home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env'
+```
+
+После ручного изменения `auth.env` перезапустить сервис:
+
+```bash
+ssh ivm-1 'sudo systemctl restart af-dags-helper.service'
+```
 
 ## Использование GUI
 

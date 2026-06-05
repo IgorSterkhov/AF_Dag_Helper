@@ -41,6 +41,21 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 
+AUTH_ENV="$APP_DIR/.runtime/auth.env"
+mkdir -p "$(dirname "$AUTH_ENV")"
+if [ ! -f "$AUTH_ENV" ]; then
+  AUTH_PASSWORD="$("$APP_DIR/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  umask 077
+  {
+    printf 'AF_DAGS_HELPER_AUTH_USER=admin\n'
+    printf 'AF_DAGS_HELPER_AUTH_PASSWORD=%s\n' "$AUTH_PASSWORD"
+  } >"$AUTH_ENV"
+  echo "Created auth credentials in $AUTH_ENV"
+else
+  echo "Using existing auth credentials in $AUTH_ENV"
+fi
+chmod 600 "$AUTH_ENV"
+
 sudo tee "/etc/systemd/system/$SERVICE" >/dev/null <<UNIT
 [Unit]
 Description=AF DAGs Helper web UI
@@ -52,6 +67,7 @@ User=$(whoami)
 WorkingDirectory=$APP_DIR
 Environment=AF_DAGS_HELPER_HOST=0.0.0.0
 Environment=AF_DAGS_HELPER_PORT=$PORT
+EnvironmentFile=$AUTH_ENV
 ExecStart=$APP_DIR/.venv/bin/python -m web.app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=3

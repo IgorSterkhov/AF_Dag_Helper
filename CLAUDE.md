@@ -25,6 +25,8 @@ AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating 
 python gui/app.py
 
 # Web UI
+export AF_DAGS_HELPER_AUTH_USER=admin
+export AF_DAGS_HELPER_AUTH_PASSWORD=change-me
 python -m web.app --host 127.0.0.1 --port 8000
 
 # CLI - analyze a single DAG file
@@ -35,6 +37,9 @@ python main.py path/to/dag.py config/server_mapping.yaml
 
 # Deploy web UI to ivm-1
 scripts/deploy_ivm1.sh
+
+# Show deployed web UI credentials
+ssh ivm-1 'cat /home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env'
 ```
 
 ## Architecture
@@ -68,6 +73,7 @@ FastAPI + NiceGUI web UI
 - `OMEntityGenerator` ([generator/omentity_generator.py](generator/omentity_generator.py)) - code generation
 - `DAGAnalysisService` ([web/analysis_service.py](web/analysis_service.py)) - shared analysis workflow for web UI
 - `web.app` ([web/app.py](web/app.py)) - FastAPI + NiceGUI application and `/health`
+- `BasicAuthMiddleware` ([web/auth.py](web/auth.py)) - Basic Auth gate for web UI HTTP/WebSocket routes; `/health` is public
 
 ## OMEntity Format
 
