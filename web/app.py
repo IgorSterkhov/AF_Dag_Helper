@@ -38,6 +38,8 @@ class WebState:
         self.uploaded_source: Optional[str] = None
         self.uploaded_name = "uploaded_dag"
         self.generated_text = ""
+        self.graph_data = {}
+        self.dag_id = ""
 
 
 def create_ui():
@@ -81,9 +83,17 @@ def create_ui():
             min-height: 0;
             overflow: hidden;
             padding: 8px 0 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+          }
+          .generated-actions,
+          .diagram-actions {
+            flex: 0 0 auto;
           }
           .result-editor {
-            height: 100%;
+            flex: 1 1 auto;
+            height: auto;
             min-height: 0;
           }
           .result-editor .cm-editor {
@@ -94,9 +104,16 @@ def create_ui():
             overflow: auto;
           }
           .diagram-container {
-            height: 100%;
+            flex: 1 1 auto;
+            height: auto;
             min-height: 0;
             overflow: hidden;
+          }
+          .diagram-container iframe {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #ddd;
+            border-radius: 6px;
           }
         </style>
         """
@@ -109,15 +126,18 @@ def create_ui():
             **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
             для `inlets` и `outlets`.
 
-            **Как пользоваться:** выберите DAG на сервере, загрузите `.py` файл или вставьте код во вкладке Paste,
-            затем нажмите Analyze.
+            **Workflow:** выберите исходник во вкладках Source: Server file, Upload или Paste. При необходимости
+            включите Force all tasks для пересчета всех задач и Compare existing OMEntity для сравнения с уже
+            прописанными сущностями. Затем нажмите Analyze.
 
-            **Результаты:** Generated OMEntity содержит готовый код, Difference показывает отличие от существующего
-            `OMEntity`, Text Diagram даёт текстовую схему, Interactive Diagram показывает граф lineage,
-            Warnings содержит предупреждения парсера.
+            **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save. Difference показывает
+            отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage. Interactive Diagram
+            показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется на связях задач.
+            Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
 
-            **Опции:** Force all tasks пересчитывает все задачи, Compare existing OMEntity включает сравнение,
-            DAG view / Task view меняет начальный вид интерактивной диаграммы.
+            **Элементы интерфейса:** левая панель отвечает за выбор источника и параметры анализа. Правая панель
+            отвечает за просмотр результата. Переключатель DAG view / Task view находится на вкладке Interactive
+            Diagram и меняет вид текущей диаграммы без повторного запуска Analyze.
             """
         )
         with ui.row().classes("w-full justify-end"):
@@ -125,9 +145,8 @@ def create_ui():
 
     with ui.header().classes("items-center"):
         ui.label("AF DAGs Helper").classes("text-h6")
+        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense").tooltip("Справка")
         ui.space()
-        ui.label("FastAPI + NiceGUI").classes("text-caption")
-        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round").tooltip("Справка")
 
     with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):
         with ui.card().classes("source-pane w-1/3 min-w-[360px]"):
@@ -161,12 +180,9 @@ def create_ui():
 
             force = ui.checkbox("Force all tasks", value=True)
             compare = ui.checkbox("Compare existing OMEntity", value=True)
-            diagram_view = ui.toggle({"dag": "DAG view", "task": "Task view"}, value="dag")
 
             with ui.row().classes("w-full"):
                 analyze_btn = ui.button("Analyze", icon="play_arrow").classes("grow")
-                copy_btn = ui.button("Copy", icon="content_copy")
-                download_btn = ui.button("Download", icon="download")
 
         with ui.column().classes("result-pane w-2/3 min-h-0 overflow-hidden"):
             summary = ui.markdown("Select a source and run analysis.")
@@ -179,12 +195,24 @@ def create_ui():
 
             with ui.tab_panels(result_tabs, value=generated_tab).classes("result-panels w-full"):
                 with ui.tab_panel(generated_tab).classes("result-tab-panel"):
+                    with ui.row().classes("generated-actions w-full justify-end"):
+                        copy_btn = ui.button("Copy", icon="content_copy")
+                        download_btn = ui.button("Save", icon="download")
                     generated = ui.codemirror("", language="Python").classes("w-full result-editor")
                 with ui.tab_panel(diff_tab).classes("result-tab-panel"):
                     diff = ui.codemirror("", language="Markdown").classes("w-full result-editor")
                 with ui.tab_panel(text_diagram_tab).classes("result-tab-panel"):
                     text_diagram = ui.codemirror("", language="Markdown").classes("w-full result-editor")
                 with ui.tab_panel(graph_tab).classes("result-tab-panel"):
+                    def on_diagram_view_change(_event=None):
+                        render_diagram()
+
+                    with ui.row().classes("diagram-actions w-full justify-end"):
+                        diagram_view = ui.toggle(
+                            {"dag": "DAG view", "task": "Task view"},
+                            value="dag",
+                            on_change=on_diagram_view_change,
+                        ).props("dense")
                     diagram_html = ui.html("", sanitize=False).classes("diagram-container w-full")
                 with ui.tab_panel(warnings_tab).classes("result-tab-panel"):
                     warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
@@ -202,6 +230,16 @@ def create_ui():
         if not paste_area.value:
             raise ValueError("Paste DAG source first")
         return service.write_source_to_runtime_file("pasted_dag", paste_area.value)
+
+    def render_diagram():
+        if not state.graph_data:
+            diagram_html.set_content("<p>No graph data available.</p>")
+            return
+        graph_data = dict(state.graph_data)
+        graph_data["initial_view"] = diagram_view.value
+        html = CytoscapeViewer()._build_html(graph_data, f"Lineage: {state.dag_id or 'Unknown'}")
+        srcdoc = html_lib.escape(html, quote=True)
+        diagram_html.set_content(f'<iframe srcdoc="{srcdoc}"></iframe>')
 
     def analyze():
         try:
@@ -221,14 +259,9 @@ def create_ui():
             generated.set_value(result.generated_text)
             diff.set_value(result.difference_text)
             text_diagram.set_value(result.text_diagram)
-            if result.graph_data:
-                html = CytoscapeViewer()._build_html(result.graph_data, f"Lineage: {result.dag_id}")
-                srcdoc = html_lib.escape(html, quote=True)
-                diagram_html.set_content(
-                    f'<iframe srcdoc="{srcdoc}" style="width:100%;height:100%;border:1px solid #ddd;border-radius:6px;"></iframe>'
-                )
-            else:
-                diagram_html.set_content("<p>No graph data available.</p>")
+            state.graph_data = result.graph_data
+            state.dag_id = result.dag_id
+            render_diagram()
             warnings.set_value("\n".join(result.warnings) if result.warnings else "No warnings")
             ui.notify("Analysis complete", type="positive")
         except Exception as exc:
@@ -243,7 +276,7 @@ def create_ui():
 
     def download_generated():
         if not state.generated_text:
-            ui.notify("Nothing to download", type="warning")
+            ui.notify("Nothing to save", type="warning")
             return
         ui.download(state.generated_text.encode("utf-8"), filename="omentity_output.txt", media_type="text/plain")
 
