@@ -45,6 +45,18 @@ class WebState:
         self.picker_dir = ""
 
 
+def _source_tab_name(active_tab, repo_tab, upload_tab, paste_tab) -> str:
+    for tab, name in ((repo_tab, "repo"), (upload_tab, "upload"), (paste_tab, "paste")):
+        if active_tab is tab or active_tab == tab:
+            return name
+    if isinstance(active_tab, str) and active_tab in {"repo", "upload", "paste"}:
+        return str(active_tab)
+    props = getattr(active_tab, "_props", None) or getattr(active_tab, "props", None)
+    if isinstance(props, dict) and props.get("name") in {"repo", "upload", "paste"}:
+        return str(props["name"])
+    return ""
+
+
 def create_ui():
     project_root = ROOT_DIR
     mapping_file = Path(os.environ.get("AF_DAGS_HELPER_MAPPING_FILE", project_root / "config" / "server_mapping.yaml"))
@@ -428,7 +440,7 @@ def create_ui():
                     warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
 
     def resolve_current_dag_path() -> Path:
-        active_tab = source_tabs.value
+        active_tab = _source_tab_name(source_tabs.value, repo_tab, upload_tab, paste_tab)
         if active_tab == "repo":
             if not repo_select.value:
                 raise ValueError("No repository selected")
@@ -439,9 +451,11 @@ def create_ui():
             if not state.uploaded_source:
                 raise ValueError("Upload a .py DAG first")
             return service.write_source_to_runtime_file(state.uploaded_name, state.uploaded_source)
-        if not paste_area.value:
+        if active_tab == "paste" and not paste_area.value:
             raise ValueError("Paste DAG source first")
-        return service.write_source_to_runtime_file("pasted_dag", paste_area.value)
+        if active_tab == "paste":
+            return service.write_source_to_runtime_file("pasted_dag", paste_area.value)
+        raise ValueError("Select a source tab")
 
     def render_diagram():
         if not state.graph_data:

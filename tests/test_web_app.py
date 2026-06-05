@@ -4,6 +4,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -119,6 +120,24 @@ class WebAppTest(unittest.TestCase):
         self.assertNotIn("Server file", response.text)
         self.assertIn("Repo", tabs)
         self.assertNotIn("Server file", tabs)
+
+    def test_source_tab_name_accepts_tab_object_and_string_values(self):
+        import web.app as web_app
+
+        resolver = getattr(web_app, "_source_tab_name", None)
+        self.assertIsNotNone(resolver)
+
+        repo_tab = object()
+        upload_tab = object()
+        paste_tab = object()
+
+        self.assertEqual(resolver(repo_tab, repo_tab, upload_tab, paste_tab), "repo")
+        self.assertEqual(resolver(upload_tab, repo_tab, upload_tab, paste_tab), "upload")
+        self.assertEqual(resolver(paste_tab, repo_tab, upload_tab, paste_tab), "paste")
+        self.assertEqual(resolver("repo", repo_tab, upload_tab, paste_tab), "repo")
+        self.assertEqual(resolver("upload", repo_tab, upload_tab, paste_tab), "upload")
+        self.assertEqual(resolver("paste", repo_tab, upload_tab, paste_tab), "paste")
+        self.assertEqual(resolver(SimpleNamespace(props={"name": "repo"}), repo_tab, upload_tab, paste_tab), "repo")
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_repo_tab_contains_repository_select_and_browse_button(self):
