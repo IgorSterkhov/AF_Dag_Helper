@@ -42,7 +42,9 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 
 AUTH_ENV="$APP_DIR/.runtime/auth.env"
+REPOS_DIR="$APP_DIR/repos"
 mkdir -p "$(dirname "$AUTH_ENV")"
+mkdir -p "$REPOS_DIR"
 if [ ! -f "$AUTH_ENV" ]; then
   AUTH_PASSWORD="$("$APP_DIR/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(24))')"
   umask 077
@@ -67,6 +69,7 @@ User=$(whoami)
 WorkingDirectory=$APP_DIR
 Environment=AF_DAGS_HELPER_HOST=0.0.0.0
 Environment=AF_DAGS_HELPER_PORT=$PORT
+Environment=AF_DAGS_HELPER_REPOS_DIR=$REPOS_DIR
 EnvironmentFile=$AUTH_ENV
 ExecStart=$APP_DIR/.venv/bin/python -m web.app --host 0.0.0.0 --port $PORT
 Restart=always

@@ -1,6 +1,8 @@
 import json
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -81,6 +83,94 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(help_button["tag"], "q-btn")
         self.assertEqual(help_button.get("props", {}).get("icon"), "help_outline")
         self.assertEqual(help_button.get("props", {}).get("text-color"), "white")
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_header_has_settings_button(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        headers = [element for element in elements.values() if element["tag"] == "nicegui-header"]
+        self.assertEqual(len(headers), 1)
+        header_descendants = list(_descendants(elements, headers[0]))
+
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("icon") == "settings"
+                and element.get("props", {}).get("text-color") == "white"
+                for element in header_descendants
+            )
+        )
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_source_tabs_use_repo_tab(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        tabs = [
+            element.get("props", {}).get("label")
+            for element in elements.values()
+            if element["tag"] == "q-tab"
+        ]
+
+        self.assertNotIn("Server file", response.text)
+        self.assertIn("Repo", tabs)
+        self.assertNotIn("Server file", tabs)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_repo_tab_contains_repository_select_and_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = Path(tmp)
+            repo = repos_root / "analytics"
+            (repo / ".git").mkdir(parents=True)
+            (repo / "dags" / "daily").mkdir(parents=True)
+            (repo / "dags" / "daily" / "sales.py").write_text("print('sales')", encoding="utf-8")
+            with patch.dict("os.environ", {"AF_DAGS_HELPER_REPOS_DIR": str(repos_root)}):
+                client = TestClient(app)
+                response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        repo_panels = [
+            element for element in elements.values()
+            if element["tag"] == "q-tab-panel"
+            and element.get("props", {}).get("name") == "repo"
+        ]
+        self.assertEqual(len(repo_panels), 1)
+        descendants = list(_descendants(elements, repo_panels[0]))
+
+        self.assertTrue(
+            any(
+                element["tag"] == "nicegui-select"
+                and element.get("props", {}).get("label") == "Repository"
+                for element in descendants
+            )
+        )
+        self.assertTrue(any(element["tag"] == "q-tree" for element in descendants))
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_settings_dialog_contains_repository_actions(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        dialogs = [element for element in elements.values() if element["tag"] == "nicegui-dialog"]
+        dialog_descendants = [
+            descendant
+            for dialog in dialogs
+            for descendant in _descendants(elements, dialog)
+        ]
+        labels = {
+            element.get("props", {}).get("label") or element.get("text")
+            for element in dialog_descendants
+        }
+
+        self.assertIn("Repository settings", labels)
+        self.assertIn("Add", labels)
+        self.assertIn("Remove", labels)
+        self.assertIn("Git pull selected", labels)
+        self.assertIn("Git pull all", labels)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_result_tabs_own_their_content_widgets(self):

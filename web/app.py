@@ -19,7 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 from visualizer.cytoscape_viewer import CytoscapeViewer  # noqa: E402
 from web.analysis_service import DAGAnalysisRequest, DAGAnalysisService  # noqa: E402
 from web.auth import BasicAuthMiddleware  # noqa: E402
-from web.server_files import ServerFileBrowser  # noqa: E402
+from web.repository_browser import RepositoryBrowser  # noqa: E402
 
 
 app = FastAPI(title="AF DAGs Helper")
@@ -40,6 +40,8 @@ class WebState:
         self.generated_text = ""
         self.graph_data = {}
         self.dag_id = ""
+        self.selected_repo: Optional[str] = None
+        self.selected_dag_node: Optional[str] = None
 
 
 def create_ui():
@@ -47,7 +49,12 @@ def create_ui():
     mapping_file = Path(os.environ.get("AF_DAGS_HELPER_MAPPING_FILE", project_root / "config" / "server_mapping.yaml"))
     runtime_dir = Path(os.environ.get("AF_DAGS_HELPER_RUNTIME_DIR", project_root / ".runtime" / "uploads"))
     service = DAGAnalysisService(project_root, mapping_file, runtime_dir=runtime_dir)
-    browser = ServerFileBrowser(project_root)
+    repos_root = Path(os.environ.get("AF_DAGS_HELPER_REPOS_DIR", project_root / "repos"))
+    repository_registry = Path(os.environ.get(
+        "AF_DAGS_HELPER_REPOSITORY_REGISTRY",
+        runtime_dir.parent / "repositories.json",
+    ))
+    repository_browser = RepositoryBrowser(repos_root, repository_registry)
     state = WebState()
 
     ui.add_head_html(
@@ -115,9 +122,124 @@ def create_ui():
             border: 1px solid #ddd;
             border-radius: 6px;
           }
+          .repo-tree {
+            max-height: 320px;
+            overflow: auto;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 4px;
+          }
         </style>
         """
     )
+
+    def registered_repo_names():
+        return repository_browser.registered_repositories()
+
+    def addable_repo_names():
+        registered = set(registered_repo_names())
+        return [name for name in repository_browser.discover_repositories() if name not in registered]
+
+    def load_repo_tree():
+        selected_repo = repo_select.value
+        state.selected_repo = selected_repo
+        state.selected_dag_node = None
+        selected_dag_label.set_text("No DAG selected")
+        dag_tree.props["selected"] = None
+        if not selected_repo:
+            dag_tree.props["nodes"] = []
+            dag_tree.update()
+            return
+        try:
+            dag_tree.props["nodes"] = repository_browser.build_dag_tree(selected_repo)
+        except Exception as exc:
+            dag_tree.props["nodes"] = []
+            ui.notify(f"Failed to load repository tree: {exc}", type="negative", close_button=True)
+        dag_tree.update()
+
+    def refresh_repo_controls(preferred_repo: Optional[str] = None):
+        registered = registered_repo_names()
+        selected_repo = preferred_repo if preferred_repo in registered else repo_select.value
+        if selected_repo not in registered:
+            selected_repo = registered[0] if registered else None
+        repo_select.set_options(registered, value=selected_repo)
+        settings_registered_select.set_options(registered, value=selected_repo)
+        addable = addable_repo_names()
+        settings_discovered_select.set_options(addable, value=addable[0] if addable else None)
+        load_repo_tree()
+
+    def on_repo_change(_event=None):
+        load_repo_tree()
+
+    def on_dag_select(event):
+        node_id = event.value
+        if not node_id or not str(node_id).startswith("file:"):
+            state.selected_dag_node = None
+            selected_dag_label.set_text("Select a .py DAG file")
+            return
+        state.selected_repo = repo_select.value
+        state.selected_dag_node = str(node_id)
+        selected_dag_label.set_text(f"Selected DAG: {str(node_id).removeprefix('file:')}")
+
+    def add_selected_repository():
+        repo_name = settings_discovered_select.value
+        if not repo_name:
+            ui.notify("No repository folder selected", type="warning")
+            return
+        try:
+            repository_browser.add_repository(repo_name)
+            refresh_repo_controls(preferred_repo=repo_name)
+            settings_status.set_content(f"Registered `{repo_name}`.")
+            ui.notify(f"Repository registered: {repo_name}", type="positive")
+        except Exception as exc:
+            ui.notify(f"Failed to add repository: {exc}", type="negative", close_button=True)
+
+    def remove_selected_repository():
+        repo_name = settings_registered_select.value
+        if not repo_name:
+            ui.notify("No registered repository selected", type="warning")
+            return
+        repository_browser.remove_repository(repo_name)
+        refresh_repo_controls()
+        settings_status.set_content(f"Removed `{repo_name}` from the web UI registry.")
+        ui.notify(f"Repository removed: {repo_name}", type="positive")
+
+    def pull_repository_from_settings():
+        repo_name = settings_registered_select.value
+        if not repo_name:
+            ui.notify("No registered repository selected", type="warning")
+            return
+        pull_repository(repo_name)
+
+    def pull_current_repository():
+        repo_name = repo_select.value
+        if not repo_name:
+            ui.notify("No repository selected", type="warning")
+            return
+        pull_repository(repo_name)
+
+    def pull_repository(repo_name: str):
+        try:
+            output = repository_browser.pull_repository(repo_name) or "Already up to date."
+            refresh_repo_controls(preferred_repo=repo_name)
+            settings_status.set_content(f"**{repo_name}:**\n\n```text\n{output}\n```")
+            ui.notify(f"Git pull complete: {repo_name}", type="positive")
+        except Exception as exc:
+            ui.notify(f"Git pull failed: {exc}", type="negative", close_button=True)
+
+    def pull_all_repositories():
+        try:
+            results = repository_browser.pull_all()
+            refresh_repo_controls(preferred_repo=repo_select.value)
+            if not results:
+                settings_status.set_content("No registered repositories.")
+                ui.notify("No registered repositories", type="warning")
+                return
+            lines = [f"{name}: {output or 'Already up to date.'}" for name, output in results.items()]
+            settings_status.set_content("```text\n" + "\n".join(lines) + "\n```")
+            ui.notify("Git pull complete for all repositories", type="positive")
+        except Exception as exc:
+            ui.notify(f"Git pull all failed: {exc}", type="negative", close_button=True)
 
     with ui.dialog() as help_dialog, ui.card().classes("max-w-[720px]"):
         ui.label("Справка по AF DAGs Helper").classes("text-h6")
@@ -126,37 +248,60 @@ def create_ui():
             **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
             для `inlets` и `outlets`.
 
-            **Workflow:** выберите исходник во вкладках Source: Server file, Upload или Paste. При необходимости
-            включите Force all tasks для пересчета всех задач и Compare existing OMEntity для сравнения с уже
-            прописанными сущностями. Затем нажмите Analyze.
+            **Workflow:** выберите исходник во вкладках Source: Repo, Upload или Paste. Во вкладке Repo сначала
+            выберите зарегистрированный репозиторий, затем раскройте дерево папок и выберите `.py` DAG. При
+            необходимости включите Force all tasks для пересчета всех задач и Compare existing OMEntity для
+            сравнения с уже прописанными сущностями. Затем нажмите Analyze.
 
             **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save. Difference показывает
             отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage. Interactive Diagram
             показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется на связях задач.
             Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
 
-            **Элементы интерфейса:** левая панель отвечает за выбор источника и параметры анализа. Правая панель
-            отвечает за просмотр результата. Переключатель DAG view / Task view находится на вкладке Interactive
-            Diagram и меняет вид текущей диаграммы без повторного запуска Analyze.
+            **Элементы интерфейса:** левая панель отвечает за выбор источника и параметры анализа. Кнопка Settings
+            в header открывает управление репозиториями: add/remove и git pull. Правая панель отвечает за просмотр
+            результата. Переключатель DAG view / Task view находится на вкладке Interactive Diagram и меняет вид
+            текущей диаграммы без повторного запуска Analyze.
             """
         )
         with ui.row().classes("w-full justify-end"):
             ui.button("Закрыть", on_click=help_dialog.close)
 
+    with ui.dialog() as settings_dialog, ui.card().classes("max-w-[760px] w-full"):
+        ui.label("Repository settings").classes("text-h6")
+        ui.markdown(
+            f"""
+            Repositories root: `{repos_root}`
+
+            Add existing git folders from this directory to make them available in the Repo tab.
+            """
+        )
+        settings_registered_select = ui.select([], label="Registered repository").classes("w-full")
+        settings_discovered_select = ui.select([], label="Folder in repos").classes("w-full")
+        with ui.row().classes("w-full"):
+            ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
+            ui.button("Add", icon="add", on_click=add_selected_repository)
+            ui.button("Remove", icon="delete", on_click=remove_selected_repository)
+        with ui.row().classes("w-full"):
+            ui.button("Git pull selected", icon="download", on_click=pull_repository_from_settings)
+            ui.button("Git pull all", icon="sync", on_click=pull_all_repositories)
+        settings_status = ui.markdown("").classes("w-full")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Close", on_click=settings_dialog.close)
+
     with ui.header().classes("items-center"):
         ui.label("AF DAGs Helper").classes("text-h6")
         ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
+        ui.button(icon="settings", on_click=settings_dialog.open).props("flat round dense text-color=white").tooltip("Settings")
         ui.space()
 
     with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):
         with ui.card().classes("source-pane w-1/3 min-w-[360px]"):
             ui.label("Source").classes("text-h6")
             with ui.tabs().classes("w-full") as source_tabs:
-                server_tab = ui.tab("server", label="Server file")
+                repo_tab = ui.tab("repo", label="Repo")
                 upload_tab = ui.tab("upload", label="Upload")
                 paste_tab = ui.tab("paste", label="Paste")
-
-            server_files = browser.list_dag_files()
 
             def on_upload(event):
                 content = event.content.read()
@@ -164,14 +309,15 @@ def create_ui():
                 state.uploaded_name = Path(event.name).stem
                 upload_label.set_text(f"Uploaded: {event.name}")
 
-            with ui.tab_panels(source_tabs, value=server_tab).classes("w-full"):
-                with ui.tab_panel(server_tab):
-                    ui.label("Choose a DAG from allowed project folders.")
-                    selected_file = ui.select(
-                        server_files,
-                        label="DAG file",
-                        value=server_files[0] if server_files else None,
-                    ).classes("w-full")
+            with ui.tab_panels(source_tabs, value=repo_tab).classes("w-full"):
+                with ui.tab_panel(repo_tab):
+                    ui.label("Choose a DAG from registered repositories.")
+                    repo_select = ui.select([], label="Repository", on_change=on_repo_change).classes("w-full")
+                    selected_dag_label = ui.label("No DAG selected")
+                    with ui.row().classes("w-full"):
+                        ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
+                        ui.button("Git pull", icon="download", on_click=pull_current_repository)
+                    dag_tree = ui.tree([], on_select=on_dag_select).classes("repo-tree w-full")
                 with ui.tab_panel(upload_tab):
                     ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
                     upload_label = ui.label("No file uploaded")
@@ -219,10 +365,12 @@ def create_ui():
 
     def resolve_current_dag_path() -> Path:
         active_tab = source_tabs.value
-        if active_tab == "server":
-            if not selected_file.value:
-                raise ValueError("No server DAG file selected")
-            return browser.resolve(selected_file.value)
+        if active_tab == "repo":
+            if not repo_select.value:
+                raise ValueError("No repository selected")
+            if not state.selected_dag_node:
+                raise ValueError("No DAG selected")
+            return repository_browser.resolve_dag_path(repo_select.value, state.selected_dag_node)
         if active_tab == "upload":
             if not state.uploaded_source:
                 raise ValueError("Upload a .py DAG first")
@@ -283,6 +431,7 @@ def create_ui():
     analyze_btn.on_click(analyze)
     copy_btn.on_click(copy_generated)
     download_btn.on_click(download_generated)
+    refresh_repo_controls()
 
 
 @ui.page("/")

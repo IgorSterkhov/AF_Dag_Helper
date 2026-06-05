@@ -24,6 +24,7 @@ config/settings.yaml
 
 # Runtime state and uploads
 .runtime/
+repos/
 
 # Generated diagram previews
 test_*.html
