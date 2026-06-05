@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI
@@ -43,6 +43,10 @@ class WebState:
         self.selected_repo: Optional[str] = None
         self.selected_dag_node: Optional[str] = None
         self.picker_dir = ""
+        self.picker_nodes: List[Dict] = []
+        self.picker_expanded_dirs: Set[str] = set()
+        self.picker_search = ""
+        self.picker_selected_node: Optional[str] = None
 
 
 def _source_tab_name(active_tab, repo_tab, upload_tab, paste_tab) -> str:
@@ -55,6 +59,52 @@ def _source_tab_name(active_tab, repo_tab, upload_tab, paste_tab) -> str:
     if isinstance(props, dict) and props.get("name") in {"repo", "upload", "paste"}:
         return str(props["name"])
     return ""
+
+
+def _ancestor_dir_ids(path: str, node_type: str) -> List[str]:
+    parts = [part for part in path.split("/") if part]
+    directory_parts = parts[:-1] if node_type == "file" else parts[:-1]
+    return [
+        "dir:" + "/".join(directory_parts[:index])
+        for index in range(1, len(directory_parts) + 1)
+    ]
+
+
+def _containing_dir_ids(path: str) -> List[str]:
+    parts = [part for part in path.split("/") if part][:-1]
+    return [
+        "dir:" + "/".join(parts[:index])
+        for index in range(1, len(parts) + 1)
+    ]
+
+
+def _visible_dag_picker_rows(nodes: List[Dict], expanded_dirs: Set[str], search: str, selected_node: Optional[str]) -> List[Dict]:
+    query = search.strip().lower()
+    matching_file_ids = set()
+    visible_dir_ids = set()
+    if query:
+        for node in nodes:
+            if node.get("type") == "file" and query in node.get("name", "").lower():
+                matching_file_ids.add(node["id"])
+                visible_dir_ids.update(_containing_dir_ids(node.get("path", "")))
+
+    visible_rows = []
+    for node in nodes:
+        node_type = node.get("type")
+        node_id = node.get("id")
+        if query:
+            visible = node_id in matching_file_ids if node_type == "file" else node_id in visible_dir_ids
+        else:
+            visible = all(ancestor in expanded_dirs for ancestor in _ancestor_dir_ids(node.get("path", ""), node_type))
+        if not visible:
+            continue
+
+        row = dict(node)
+        row["expanded"] = bool(query) or node_id in expanded_dirs
+        row["icon"] = "folder_open" if row["type"] == "dir" and row["expanded"] else "folder" if row["type"] == "dir" else "description"
+        row["is_selected"] = node_id == selected_node
+        visible_rows.append(row)
+    return visible_rows
 
 
 def create_ui():
@@ -135,17 +185,53 @@ def create_ui():
             border: 1px solid #ddd;
             border-radius: 6px;
           }
-          .dag-picker-list {
-            max-height: 58vh;
-            overflow: auto;
+          .dag-picker-card {
+            width: min(1100px, 96vw);
+            max-width: 96vw;
+          }
+          .dag-picker-table {
+            height: 64vh;
             border: 1px solid #ddd;
             border-radius: 6px;
-            padding: 8px;
           }
-          .dag-picker-entry {
-            width: 100%;
-            justify-content: flex-start;
-            text-align: left;
+          .dag-picker-table .q-table__middle {
+            max-height: 64vh;
+          }
+          .dag-picker-table .q-table tbody td {
+            height: 30px;
+            padding: 0 8px;
+            font-size: 13px;
+          }
+          .dag-picker-table .q-table thead th {
+            height: 32px;
+            padding: 0 8px;
+            font-size: 12px;
+          }
+          .dag-picker-table tbody tr {
+            cursor: pointer;
+          }
+          .dag-name-content {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+          }
+          .dag-name-text,
+          .dag-meta-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          .dag-chevron-spacer {
+            width: 16px;
+            flex: 0 0 16px;
+          }
+          .dag-selected-name {
+            color: #0d47a1;
+            font-weight: 600;
+          }
+          .dag-muted-cell {
+            color: #667085;
           }
         </style>
         """
@@ -161,6 +247,10 @@ def create_ui():
     def clear_selected_dag():
         state.selected_dag_node = None
         state.picker_dir = ""
+        state.picker_nodes = []
+        state.picker_expanded_dirs = set()
+        state.picker_search = ""
+        state.picker_selected_node = None
         selected_dag_label.set_text("No DAG selected")
 
     def refresh_selected_repo():
@@ -182,71 +272,117 @@ def create_ui():
     def on_repo_change(_event=None):
         refresh_selected_repo()
 
-    def render_dag_picker():
-        picker_list.clear()
+    def load_dag_picker_index(refresh: bool = False):
         selected_repo = repo_select.value
-        with picker_list:
-            if not selected_repo:
-                state.picker_dir = ""
-                picker_path_label.set_text("Current folder: /")
-                ui.label("Select a repository first.").classes("text-grey-7")
-                return
-            try:
-                listing = repository_browser.list_directory(selected_repo, state.picker_dir)
-            except Exception as exc:
-                picker_path_label.set_text("Current folder: /")
-                ui.label(f"Failed to load DAG folder: {exc}").classes("text-negative")
-                return
+        if not selected_repo:
+            state.picker_nodes = []
+            state.picker_expanded_dirs = set()
+            return
+        state.picker_nodes = repository_browser.build_dag_index(selected_repo, refresh=refresh)
+        state.picker_expanded_dirs = {
+            node["id"] for node in state.picker_nodes
+            if node["type"] == "dir"
+        }
+        if state.picker_selected_node:
+            selected_node = next((node for node in state.picker_nodes if node["id"] == state.picker_selected_node), None)
+            if selected_node:
+                state.picker_expanded_dirs.update(_containing_dir_ids(selected_node["path"]))
 
-            state.picker_dir = listing["current"]
-            current_label = f"/{state.picker_dir}" if state.picker_dir else "/"
-            picker_path_label.set_text(f"Current folder: {current_label}")
+    def render_dag_picker():
+        rows = _visible_dag_picker_rows(
+            state.picker_nodes,
+            state.picker_expanded_dirs,
+            state.picker_search,
+            state.picker_selected_node,
+        )
+        dag_table.update_rows(rows, clear_selection=False)
+        dag_table.update()
+        total_dags = sum(1 for node in state.picker_nodes if node["type"] == "file")
+        visible_dags = sum(1 for row in rows if row["type"] == "file")
+        if state.picker_search:
+            picker_count_label.set_text(f"{visible_dags} of {total_dags} DAGs")
+        else:
+            picker_count_label.set_text(f"{total_dags} DAGs")
+        if state.picker_selected_node:
+            picker_select_btn.enable()
+        else:
+            picker_select_btn.disable()
 
-            if not listing["directories"] and not listing["files"]:
-                ui.label("No folders or .py DAG files here.").classes("text-grey-7")
-
-            for directory in listing["directories"]:
-                ui.button(
-                    directory["name"],
-                    icon="folder",
-                    on_click=lambda path=directory["path"]: navigate_dag_picker(path),
-                ).props("flat align=left").classes("dag-picker-entry")
-
-            for dag_file in listing["files"]:
-                ui.button(
-                    dag_file["name"],
-                    icon="description",
-                    on_click=lambda file=dag_file: select_dag_from_picker(file),
-                ).props("flat align=left").classes("dag-picker-entry")
-
-    def navigate_dag_picker(path: str):
-        state.picker_dir = "" if path in {"", "."} else path.strip("/")
+    def on_picker_search(event):
+        state.picker_search = event.value or ""
         render_dag_picker()
 
-    def go_picker_up():
-        if not state.picker_dir:
+    def toggle_picker_directory(node_id: str):
+        if state.picker_search:
             return
-        parent = Path(state.picker_dir).parent.as_posix()
-        navigate_dag_picker("" if parent == "." else parent)
+        if node_id in state.picker_expanded_dirs:
+            state.picker_expanded_dirs.remove(node_id)
+        else:
+            state.picker_expanded_dirs.add(node_id)
+        render_dag_picker()
 
-    def select_dag_from_picker(dag_file):
+    def select_picker_row(row: Dict):
+        if row.get("type") != "file":
+            return
+        state.picker_selected_node = row["id"]
+        render_dag_picker()
+
+    def confirm_picker_selection():
+        if not state.picker_selected_node:
+            ui.notify("Select a .py DAG first", type="warning")
+            return
+        selected = next((node for node in state.picker_nodes if node["id"] == state.picker_selected_node), None)
+        if not selected or selected.get("type") != "file":
+            ui.notify("Select a .py DAG first", type="warning")
+            return
         state.selected_repo = repo_select.value
-        state.selected_dag_node = dag_file["node_id"]
-        selected_dag_label.set_text(f"Selected DAG: {dag_file['path']}")
+        state.selected_dag_node = selected["node_id"]
+        selected_dag_label.set_text(f"Selected DAG: {selected['path']}")
         dag_picker_dialog.close()
+
+    def picker_event_row(event) -> Dict:
+        row = event.args
+        if isinstance(row, list) and row:
+            row = row[0]
+        return row if isinstance(row, dict) else {}
+
+    def handle_picker_row_click(event):
+        row = picker_event_row(event)
+        if row.get("type") == "dir":
+            toggle_picker_directory(row["id"])
+            return
+        select_picker_row(row)
+
+    def handle_picker_row_double_click(event):
+        row = picker_event_row(event)
+        if row.get("type") == "dir":
+            toggle_picker_directory(row["id"])
+            return
+        select_picker_row(row)
+        confirm_picker_selection()
+
+    def refresh_dag_picker():
+        try:
+            load_dag_picker_index(refresh=True)
+            render_dag_picker()
+            ui.notify("DAG list refreshed", type="positive")
+        except Exception as exc:
+            ui.notify(f"Failed to refresh DAG list: {exc}", type="negative", close_button=True)
 
     def open_dag_picker():
         if not repo_select.value:
             ui.notify("Select a repository first", type="warning")
             return
-        if state.selected_dag_node and state.selected_repo == repo_select.value:
-            selected_path = Path(state.selected_dag_node.removeprefix("file:"))
-            parent = selected_path.parent.as_posix()
-            state.picker_dir = "" if parent == "." else parent
-        else:
-            state.picker_dir = ""
-        render_dag_picker()
-        dag_picker_dialog.open()
+        try:
+            state.picker_search = ""
+            picker_search_input.set_value("")
+            picker_repo_label.set_text(f"Repository: {repo_select.value}")
+            state.picker_selected_node = state.selected_dag_node if state.selected_repo == repo_select.value else None
+            load_dag_picker_index()
+            render_dag_picker()
+            dag_picker_dialog.open()
+        except Exception as exc:
+            ui.notify(f"Failed to load DAG list: {exc}", type="negative", close_button=True)
 
     def add_selected_repository():
         repo_name = settings_discovered_select.value
@@ -316,7 +452,7 @@ def create_ui():
             для `inlets` и `outlets`.
 
             **Workflow:** выберите исходник во вкладках Source: Repo, Upload или Paste. Во вкладке Repo сначала
-            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в окне навигации. При
+            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в таблице с поиском. При
             необходимости включите Force all tasks для пересчета всех задач и Compare existing OMEntity для
             сравнения с уже прописанными сущностями. Затем нажмите Analyze.
 
@@ -356,13 +492,70 @@ def create_ui():
         with ui.row().classes("w-full justify-end"):
             ui.button("Close", on_click=settings_dialog.close)
 
-    with ui.dialog() as dag_picker_dialog, ui.card().classes("max-w-[820px] w-full"):
-        ui.label("Select DAG").classes("text-h6")
+    dag_picker_columns = [
+        {"name": "name", "label": "Name", "field": "name", "align": "left", "sortable": True},
+        {"name": "mtime_display", "label": "Modified", "field": "mtime_display", "align": "left", "sortable": True},
+        {"name": "git_author", "label": "Author", "field": "git_author", "align": "left", "sortable": True},
+        {"name": "git_message_short", "label": "Commit", "field": "git_message_short", "align": "left", "sortable": True},
+    ]
+    with ui.dialog() as dag_picker_dialog, ui.card().classes("dag-picker-card"):
         with ui.row().classes("w-full items-center"):
-            ui.button("Up", icon="arrow_upward", on_click=go_picker_up).props("flat")
-            picker_path_label = ui.label("Current folder: /").classes("text-caption text-grey-7")
-        picker_list = ui.column().classes("dag-picker-list w-full")
+            ui.label("Select DAG").classes("text-h6")
+            picker_repo_label = ui.label("").classes("text-caption text-grey-7")
+            ui.space()
+            ui.button(icon="refresh", on_click=refresh_dag_picker).props("flat round dense").tooltip("Refresh DAG list")
+        with ui.row().classes("w-full items-center"):
+            picker_search_input = ui.input(
+                placeholder="Search DAG filename...",
+                on_change=on_picker_search,
+            ).props("dense outlined clearable debounce=300").classes("grow")
+            picker_count_label = ui.label("0 DAGs").classes("text-caption text-grey-7")
+        dag_table = ui.table(
+            rows=[],
+            columns=dag_picker_columns,
+            row_key="id",
+            pagination=0,
+        ).props("dense flat virtual-scroll hide-pagination").classes("dag-picker-table w-full")
+        dag_table.add_slot(
+            "body-cell-name",
+            """
+            <q-td :props="props">
+              <div class="dag-name-content" :style="{ paddingLeft: `${props.row.level * 18}px` }" :title="props.row.path">
+                <q-icon
+                  v-if="props.row.type === 'dir'"
+                  :name="props.row.expanded ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
+                  size="16px"
+                />
+                <span v-else class="dag-chevron-spacer"></span>
+                <q-icon
+                  :name="props.row.icon"
+                  size="16px"
+                  :class="props.row.type === 'dir' ? 'text-amber-8' : 'text-blue-grey-7'"
+                />
+                <span class="dag-name-text" :class="props.row.is_selected ? 'dag-selected-name' : ''">
+                  {{ props.row.name }}
+                </span>
+              </div>
+            </q-td>
+            """,
+        )
+        dag_table.add_slot(
+            "body-cell-mtime_display",
+            '<q-td :props="props" class="dag-muted-cell"><span class="dag-meta-text">{{ props.value }}</span></q-td>',
+        )
+        dag_table.add_slot(
+            "body-cell-git_author",
+            '<q-td :props="props" class="dag-muted-cell"><span class="dag-meta-text" :title="props.value">{{ props.value }}</span></q-td>',
+        )
+        dag_table.add_slot(
+            "body-cell-git_message_short",
+            '<q-td :props="props" class="dag-muted-cell"><span class="dag-meta-text" :title="props.row.git_message">{{ props.value }}</span></q-td>',
+        )
+        dag_table.on("row-click", handle_picker_row_click, js_handler="(_, row) => emit(row)")
+        dag_table.on("row-dblclick", handle_picker_row_double_click, js_handler="(_, row) => emit(row)")
         with ui.row().classes("w-full justify-end"):
+            picker_select_btn = ui.button("Select", icon="check", on_click=confirm_picker_selection)
+            picker_select_btn.disable()
             ui.button("Cancel", on_click=dag_picker_dialog.close)
 
     with ui.header().classes("items-center"):

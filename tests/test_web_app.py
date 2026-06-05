@@ -178,7 +178,7 @@ class WebAppTest(unittest.TestCase):
         self.assertFalse(any(element["tag"] == "q-tree" for element in descendants))
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
-    def test_dag_picker_dialog_contains_navigation_controls(self):
+    def test_dag_picker_dialog_contains_compact_table_controls(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))
         elements = _nicegui_elements(response.text)
@@ -193,6 +193,10 @@ class WebAppTest(unittest.TestCase):
             element.get("props", {}).get("label") or element.get("text")
             for element in dialog_descendants
         }
+        placeholders = {
+            element.get("props", {}).get("placeholder")
+            for element in dialog_descendants
+        }
         icons = {
             element.get("props", {}).get("icon")
             for element in dialog_descendants
@@ -200,9 +204,63 @@ class WebAppTest(unittest.TestCase):
         }
 
         self.assertIn("Select DAG", labels)
-        self.assertIn("Up", labels)
-        self.assertIn("Current folder: /", labels)
-        self.assertIn("arrow_upward", icons)
+        self.assertIn("Search DAG filename...", placeholders)
+        self.assertIn("Select", labels)
+        self.assertIn("Cancel", labels)
+        self.assertIn("refresh", icons)
+        self.assertTrue(any(element["tag"] == "nicegui-table" for element in dialog_descendants))
+
+    def test_visible_dag_picker_rows_respect_expanded_dirs_and_search(self):
+        import web.app as web_app
+
+        nodes = [
+            {"id": "dir:dags", "type": "dir", "name": "dags", "path": "dags", "level": 0},
+            {"id": "dir:dags/daily", "type": "dir", "name": "daily", "path": "dags/daily", "level": 1},
+            {
+                "id": "file:dags/daily/sales_report.py",
+                "type": "file",
+                "name": "sales_report.py",
+                "path": "dags/daily/sales_report.py",
+                "level": 2,
+            },
+            {
+                "id": "file:dags/daily/stock_sync.py",
+                "type": "file",
+                "name": "stock_sync.py",
+                "path": "dags/daily/stock_sync.py",
+                "level": 2,
+            },
+            {"id": "dir:archive", "type": "dir", "name": "archive", "path": "archive", "level": 0},
+            {
+                "id": "file:archive/old_sales.py",
+                "type": "file",
+                "name": "old_sales.py",
+                "path": "archive/old_sales.py",
+                "level": 1,
+            },
+        ]
+
+        collapsed = web_app._visible_dag_picker_rows(nodes, set(), "", None)
+        expanded = web_app._visible_dag_picker_rows(nodes, {"dir:dags", "dir:dags/daily"}, "", "file:dags/daily/sales_report.py")
+        searched = web_app._visible_dag_picker_rows(nodes, set(), "sales", None)
+
+        self.assertEqual([row["id"] for row in collapsed], ["dir:dags", "dir:archive"])
+        self.assertEqual([row["id"] for row in expanded], [
+            "dir:dags",
+            "dir:dags/daily",
+            "file:dags/daily/sales_report.py",
+            "file:dags/daily/stock_sync.py",
+            "dir:archive",
+        ])
+        self.assertTrue(expanded[2]["is_selected"])
+        self.assertEqual([row["id"] for row in searched], [
+            "dir:dags",
+            "dir:dags/daily",
+            "file:dags/daily/sales_report.py",
+            "dir:archive",
+            "file:archive/old_sales.py",
+        ])
+        self.assertTrue(all(row["expanded"] for row in searched if row["type"] == "dir"))
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_settings_dialog_contains_repository_actions(self):

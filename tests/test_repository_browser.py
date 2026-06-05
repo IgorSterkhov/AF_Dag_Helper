@@ -160,6 +160,86 @@ class RepositoryBrowserTest(unittest.TestCase):
             self.assertEqual(listing["directories"], [])
             self.assertEqual(listing["files"], [])
 
+    def test_builds_dag_index_with_tree_rows_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            (repo / ".git").mkdir(parents=True)
+            (repo / "dags" / "daily").mkdir(parents=True)
+            (repo / "dags" / "daily" / "sales.py").write_text("print('sales')", encoding="utf-8")
+            (repo / "dags" / "daily" / "notes.txt").write_text("ignore", encoding="utf-8")
+            (repo / "root_dag.py").write_text("print('root')", encoding="utf-8")
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            with patch.object(browser, "_git_metadata_for_python_files") as git_metadata:
+                git_metadata.return_value = {
+                    "dags/daily/sales.py": {
+                        "git_author": "Ivan Petrov",
+                        "git_message": "fix schedule window for daily DAG",
+                    }
+                }
+                index = browser.build_dag_index("repo_a")
+
+            by_id = {node["id"]: node for node in index}
+
+            self.assertEqual([node["id"] for node in index], [
+                "dir:dags",
+                "dir:dags/daily",
+                "file:dags/daily/sales.py",
+                "file:root_dag.py",
+            ])
+            self.assertEqual(by_id["dir:dags"]["type"], "dir")
+            self.assertEqual(by_id["dir:dags"]["level"], 0)
+            self.assertEqual(by_id["dir:dags/daily"]["parent"], "dir:dags")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["type"], "file")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["level"], 2)
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["node_id"], "file:dags/daily/sales.py")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["git_author"], "Ivan Petrov")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["git_message_short"], "fix schedule window ")
+            self.assertIn("mtime_display", by_id["file:dags/daily/sales.py"])
+            self.assertEqual(by_id["file:root_dag.py"]["git_author"], "-")
+
+    def test_build_dag_index_ignores_symlinked_entries_outside_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            outside = root / "outside"
+            (repo / ".git").mkdir(parents=True)
+            outside.mkdir()
+            (outside / "leak.py").write_text("print('leak')", encoding="utf-8")
+            try:
+                (repo / "external.py").symlink_to(outside / "leak.py")
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks are not available: {exc}")
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            self.assertEqual(browser.build_dag_index("repo_a"), [])
+
+    def test_git_metadata_for_python_files_parses_batch_git_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = RepositoryBrowser(root, root / "registry.json")
+
+            with patch("web.repository_browser.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = (
+                    "\x1eIvan Petrov\x1ffix schedule window for daily DAG\n"
+                    "dags/daily/sales.py\n"
+                    "\n"
+                    "\x1eAnna Sidorova\x1fadd retry handling\n"
+                    "root_dag.py\n"
+                )
+
+                metadata = browser._git_metadata_for_python_files(root)
+
+            run.assert_called_once()
+            self.assertIn("log", run.call_args.args[0])
+            self.assertEqual(metadata["dags/daily/sales.py"]["git_author"], "Ivan Petrov")
+            self.assertEqual(metadata["dags/daily/sales.py"]["git_message"], "fix schedule window for daily DAG")
+            self.assertEqual(metadata["root_dag.py"]["git_author"], "Anna Sidorova")
+
     def test_pull_repository_uses_git_without_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
