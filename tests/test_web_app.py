@@ -29,6 +29,15 @@ class WebAppTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_valid_credentials_create_session_cookie(self):
+        client = TestClient(app)
+        first_response = client.get("/", auth=("admin", "secret"))
+        second_response = client.get("/")
+
+        self.assertIn("af_dags_helper_auth", first_response.headers["set-cookie"])
+        self.assertEqual(second_response.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,9 @@
 
 import base64
 import binascii
+import hashlib
+import hmac
+from http.cookies import CookieError, SimpleCookie
 import os
 import secrets
 from typing import Optional
@@ -12,6 +15,7 @@ from starlette.responses import PlainTextResponse
 AUTH_REALM = "AF DAGs Helper"
 PUBLIC_PATHS = {"/health"}
 PROTECTED_SCOPE_TYPES = {"http", "websocket"}
+SESSION_COOKIE = "af_dags_helper_auth"
 
 
 class BasicAuthMiddleware:
@@ -32,7 +36,9 @@ class BasicAuthMiddleware:
             await _reject(scope, receive, send, 503, "Authentication is not configured")
             return
 
-        if not _is_valid_authorization(authorization, username, password):
+        has_valid_session = _has_valid_session_cookie(scope, username, password)
+        has_valid_basic_auth = _is_valid_authorization(authorization, username, password)
+        if not has_valid_session and not has_valid_basic_auth:
             await _reject(
                 scope,
                 receive,
@@ -41,6 +47,10 @@ class BasicAuthMiddleware:
                 "Authentication required",
                 {"WWW-Authenticate": f'Basic realm="{AUTH_REALM}"'},
             )
+            return
+
+        if scope["type"] == "http" and has_valid_basic_auth:
+            await self.app(scope, receive, _with_session_cookie(send, username, password))
             return
 
         await self.app(scope, receive, send)
@@ -61,6 +71,43 @@ async def _reject(scope, receive, send, status_code: int, body: str, headers=Non
 
     response = PlainTextResponse(body, status_code=status_code, headers=headers)
     await response(scope, receive, send)
+
+
+def _with_session_cookie(send, username: str, password: str):
+    async def send_with_cookie(message):
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers", []))
+            headers.append((b"set-cookie", _build_session_cookie(username, password).encode("latin1")))
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return send_with_cookie
+
+
+def _build_session_cookie(username: str, password: str) -> str:
+    return f"{SESSION_COOKIE}={_session_token(username, password)}; HttpOnly; SameSite=Lax; Path=/"
+
+
+def _has_valid_session_cookie(scope, expected_user: str, expected_password: str) -> bool:
+    header = _get_header(scope, "cookie")
+    if not header:
+        return False
+
+    try:
+        cookie = SimpleCookie(header)
+    except CookieError:
+        return False
+
+    morsel = cookie.get(SESSION_COOKIE)
+    if morsel is None:
+        return False
+
+    expected_token = _session_token(expected_user, expected_password)
+    return secrets.compare_digest(morsel.value, expected_token)
+
+
+def _session_token(username: str, password: str) -> str:
+    return hmac.new(password.encode("utf-8"), username.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _is_valid_authorization(header: Optional[str], expected_user: str, expected_password: str) -> bool:
