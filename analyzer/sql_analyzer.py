@@ -23,6 +23,16 @@ DICTGET_FUNCTIONS = {
 }
 
 
+# ClickHouse / psycopg2 параметры %(name)s ломают sqlglot (парсит % как modulo).
+# Заменяем на безопасный строковый литерал перед парсингом.
+_PY_PLACEHOLDER_RE = re.compile(r'%\(([a-zA-Z_][a-zA-Z0-9_]*)\)s')
+
+
+def _preprocess_sql_for_parse(sql: str) -> str:
+    """Готовит SQL к sqlglot: подменяет %(name)s на строковый литерал."""
+    return _PY_PLACEHOLDER_RE.sub(r"'__p_\1__'", sql)
+
+
 class SQLAnalyzer:
     """Анализатор SQL запросов для извлечения lineage."""
 
@@ -45,7 +55,7 @@ class SQLAnalyzer:
 
         # Пробуем парсить через sqlglot
         try:
-            statements = sqlglot.parse(sql, dialect=self.dialect)
+            statements = sqlglot.parse(_preprocess_sql_for_parse(sql), dialect=self.dialect)
         except Exception as e:
             # Fallback на regex если sqlglot не смог
             result.warnings.append(f"sqlglot parse error: {e}, using regex fallback")
@@ -215,7 +225,7 @@ class SQLAnalyzer:
                 ))
 
             if len(source_parts) == 2:
-                is_remote = source_parts[0].startswith('remote_')
+                is_remote = source_parts[0].startswith('remote_') or source_parts[0] == 'remote'
                 ref = TableReference(
                     schema=source_parts[0],
                     table=source_parts[1],
@@ -263,11 +273,11 @@ class SQLAnalyzer:
         if not table_name:
             return None
 
-        # Проверяем на remote_ префикс
+        # Проверяем на remote_ префикс или ровно 'remote' как схему
         is_remote = False
         remote_prefix = None
 
-        if schema_name and schema_name.startswith('remote_'):
+        if schema_name and (schema_name.startswith('remote_') or schema_name == 'remote'):
             is_remote = True
             remote_prefix = schema_name
 
@@ -277,7 +287,7 @@ class SQLAnalyzer:
             if len(parts) == 2:
                 schema_name = parts[0]
                 table_name = parts[1]
-                if schema_name.startswith('remote_'):
+                if schema_name.startswith('remote_') or schema_name == 'remote':
                     is_remote = True
                     remote_prefix = schema_name
 
@@ -340,7 +350,7 @@ class SQLAnalyzer:
         self._temp_tables.clear()
 
         try:
-            statements = sqlglot.parse(sql, dialect=self.dialect)
+            statements = sqlglot.parse(_preprocess_sql_for_parse(sql), dialect=self.dialect)
         except Exception:
             # Fallback: возвращаем один общий результат
             return [self.analyze(sql)]
@@ -522,7 +532,7 @@ class SQLAnalyzer:
                 ))
 
             if len(source_parts) == 2:
-                is_remote = source_parts[0].startswith('remote_')
+                is_remote = source_parts[0].startswith('remote_') or source_parts[0] == 'remote'
                 ref = TableReference(
                     schema=source_parts[0],
                     table=source_parts[1],

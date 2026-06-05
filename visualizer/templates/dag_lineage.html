@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>{{TITLE}}</title>
+    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #fafafa;
+            color: #333;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        #toolbar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 10px 16px;
+            background: #fff;
+            border-bottom: 1px solid #e0e0e0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            flex-wrap: wrap;
+            z-index: 10;
+        }
+
+        #toolbar button {
+            padding: 6px 14px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: #fff;
+            color: #444;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+
+        #toolbar button:hover {
+            background: #f0f0f0;
+            border-color: #999;
+        }
+
+        #toolbar button.active {
+            background: #1976D2;
+            color: #fff;
+            border-color: #1565C0;
+        }
+
+        #toolbar button.active:hover {
+            background: #1565C0;
+        }
+
+        .separator {
+            color: #ddd;
+            margin: 0 4px;
+            user-select: none;
+        }
+
+        #task-selector {
+            padding: 5px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            background: #fff;
+            max-width: 280px;
+        }
+
+        .title {
+            margin-left: auto;
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+        }
+
+        #cy {
+            width: 100%;
+            height: calc(100vh - 52px);
+            background: #fafafa;
+        }
+
+        #tooltip {
+            position: absolute;
+            display: none;
+            padding: 10px 14px;
+            background: #333;
+            color: #fff;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+            max-width: 350px;
+            pointer-events: none;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        #tooltip .tt-type {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        #tooltip .tt-type.TABLE { background: #4FC3F7; color: #01579B; }
+        #tooltip .tt-type.API { background: #FFB74D; color: #E65100; }
+        #tooltip .tt-type.TOPIC { background: #CE93D8; color: #4A148C; }
+
+        #tooltip .tt-fqn {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        /* Legend */
+        #legend {
+            position: absolute;
+            bottom: 16px;
+            left: 16px;
+            background: rgba(255,255,255,0.95);
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 11px;
+            z-index: 10;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+
+        #legend .legend-title {
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: #666;
+        }
+
+        #legend .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 3px 0;
+        }
+
+        #legend .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            border: 2px solid;
+            flex-shrink: 0;
+        }
+
+        #legend .legend-line {
+            width: 24px;
+            height: 2px;
+            flex-shrink: 0;
+        }
+
+        #legend .legend-line.dashed {
+            background: repeating-linear-gradient(
+                90deg, #FFA726 0, #FFA726 4px, transparent 4px, transparent 8px
+            );
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <button id="btn-dag-view" class="active" onclick="switchView('dag')">DAG View</button>
+        <button id="btn-task-view" onclick="switchView('task')">Task View</button>
+        <select id="task-selector" style="display:none" onchange="showTask(this.value)">
+        </select>
+        <span class="separator">|</span>
+        <button onclick="cy.fit(undefined, 40)" title="Fit to screen">Fit</button>
+        <button onclick="cy.zoom(cy.zoom() * 1.3); cy.center()" title="Zoom in">+</button>
+        <button onclick="cy.zoom(cy.zoom() / 1.3); cy.center()" title="Zoom out">&minus;</button>
+        <span class="separator">|</span>
+        <button onclick="exportPNG()" title="Export as PNG">Export PNG</button>
+        <span class="title" id="dag-title"></span>
+    </div>
+
+    <div id="cy"></div>
+
+    <div id="tooltip"></div>
+
+    <div id="legend">
+        <div class="legend-title">Legend</div>
+        <div class="legend-item">
+            <div class="legend-color" style="background:#4FC3F7; border-color:#0288D1;"></div>
+            <span>Table</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background:#FFB74D; border-color:#F57C00; border-radius:0; transform:rotate(45deg); width:12px; height:12px;"></div>
+            <span>API</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background:#CE93D8; border-color:#8E24AA;"></div>
+            <span>Topic</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-line" style="background:#546E7A;"></div>
+            <span>Data flow</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-line dashed"></div>
+            <span>Cross-task link</span>
+        </div>
+        <div class="legend-item" id="legend-task-group" style="display:none;">
+            <div class="legend-color" style="background:#F5F5F5; border-color:#BDBDBD; border-style:dashed;"></div>
+            <span>Task group</span>
+        </div>
+    </div>
+
+    <script>
+        // Данные графа — инжектируются Python'ом
+        window.__GRAPH_DATA__ = null;
+
+        const graphData = window.__GRAPH_DATA__;
+        if (!graphData) {
+            document.getElementById('cy').innerHTML = '<p style="padding:40px;color:#999;">No graph data loaded.</p>';
+        }
+
+        // Текущий вид
+        let currentView = 'dag';
+
+        // Cytoscape стили
+        const cyStyle = [
+            // TABLE
+            {
+                selector: 'node[entity_type="TABLE"]',
+                style: {
+                    'shape': 'round-rectangle',
+                    'background-color': '#4FC3F7',
+                    'border-color': '#0288D1',
+                    'border-width': 2,
+                    'label': 'data(label)',
+                    'text-valign': 'center',
+                    'text-halign': 'center',
+                    'font-size': '11px',
+                    'font-family': '"Consolas", "Courier New", monospace',
+                    'color': '#01579B',
+                    'width': 'label',
+                    'height': 30,
+                    'padding': '14px',
+                    'text-wrap': 'wrap',
+                    'text-max-width': '250px',
+                }
+            },
+            // API
+            {
+                selector: 'node[entity_type="API"]',
+                style: {
+                    'shape': 'diamond',
+                    'background-color': '#FFB74D',
+                    'border-color': '#F57C00',
+                    'border-width': 2,
+                    'label': 'data(label)',
+                    'text-valign': 'center',
+                    'text-halign': 'center',
+                    'font-size': '10px',
+                    'font-family': '"Consolas", "Courier New", monospace',
+                    'color': '#E65100',
+                    'width': 'label',
+                    'height': 'label',
+                    'padding': '22px',
+                }
+            },
+            // TOPIC
+            {
+                selector: 'node[entity_type="TOPIC"]',
+                style: {
+                    'shape': 'barrel',
+                    'background-color': '#CE93D8',
+                    'border-color': '#8E24AA',
+                    'border-width': 2,
+                    'label': 'data(label)',
+                    'text-valign': 'center',
+                    'text-halign': 'center',
+                    'font-size': '11px',
+                    'font-family': '"Consolas", "Courier New", monospace',
+                    'color': '#4A148C',
+                    'width': 'label',
+                    'height': 30,
+                    'padding': '14px',
+                }
+            },
+            // Key group (compound parent) — in task view
+            {
+                selector: 'node[entity_type="key_group"]',
+                style: {
+                    'background-color': '#FAFAFA',
+                    'background-opacity': 0.5,
+                    'border-color': '#90A4AE',
+                    'border-width': 1,
+                    'border-style': 'dashed',
+                    'label': 'data(label)',
+                    'text-valign': 'top',
+                    'text-halign': 'center',
+                    'font-size': '10px',
+                    'font-family': '"Segoe UI", sans-serif',
+                    'color': '#90A4AE',
+                    'padding': '16px',
+                    'text-margin-y': -6,
+                }
+            },
+            // Task group (compound parent) — only in DAG view
+            {
+                selector: 'node[entity_type="task_group"]',
+                style: {
+                    'background-color': '#F5F5F5',
+                    'background-opacity': 0.6,
+                    'border-color': '#BDBDBD',
+                    'border-width': 1.5,
+                    'border-style': 'dashed',
+                    'label': 'data(label)',
+                    'text-valign': 'top',
+                    'text-halign': 'center',
+                    'font-size': '11px',
+                    'font-weight': 'bold',
+                    'font-family': '"Segoe UI", sans-serif',
+                    'color': '#616161',
+                    'padding': '24px',
+                    'text-margin-y': -8,
+                }
+            },
+            // Edges — base (taxi for orthogonal routing)
+            {
+                selector: 'edge',
+                style: {
+                    'width': 2,
+                    'line-color': '#546E7A',
+                    'target-arrow-color': '#37474F',
+                    'target-arrow-shape': 'triangle',
+                    'curve-style': 'taxi',
+                    'taxi-direction': 'rightward',
+                    'taxi-turn-min-distance': '20px',
+                    'arrow-scale': 1.2,
+                    'opacity': 0.85,
+                }
+            },
+            // Cross-task edges (dashed orange, between task groups)
+            {
+                selector: 'edge[flow_type="cross_task"]',
+                style: {
+                    'line-color': '#FFA726',
+                    'target-arrow-color': '#FB8C00',
+                    'line-style': 'dashed',
+                    'width': 2.5,
+                    'taxi-direction': 'downward',
+                }
+            },
+            // Cross-server flow
+            {
+                selector: 'edge[flow_type="cross_server"]',
+                style: {
+                    'line-color': '#FFA726',
+                    'target-arrow-color': '#FB8C00',
+                    'line-style': 'dashed',
+                    'width': 2.5,
+                }
+            },
+            // API flow edges
+            {
+                selector: 'edge[flow_type="api"]',
+                style: {
+                    'line-color': '#FF8A65',
+                    'target-arrow-color': '#E64A19',
+                }
+            },
+            // Selected node highlight
+            {
+                selector: 'node:selected',
+                style: {
+                    'border-width': 4,
+                    'border-color': '#FF5722',
+                    'overlay-padding': 6,
+                    'overlay-color': '#FF5722',
+                    'overlay-opacity': 0.1,
+                }
+            },
+            // Highlighted (neighbors)
+            {
+                selector: '.highlighted',
+                style: {
+                    'opacity': 1,
+                }
+            },
+            {
+                selector: '.faded',
+                style: {
+                    'opacity': 0.15,
+                }
+            },
+        ];
+
+        // Dagre layout config
+        const layoutOptions = {
+            name: 'dagre',
+            rankDir: 'LR',
+            nodeSep: 40,
+            rankSep: 80,
+            edgeSep: 15,
+            animate: true,
+            animationDuration: 300,
+            fit: true,
+            padding: 50,
+        };
+
+        // Инициализация Cytoscape
+        let cy = null;
+
+        function initCytoscape(elements) {
+            if (cy) {
+                cy.destroy();
+            }
+
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                elements: elements,
+                style: cyStyle,
+                layout: layoutOptions,
+                minZoom: 0.1,
+                maxZoom: 5,
+                wheelSensitivity: 0.3,
+            });
+
+            // Tooltip на hover
+            const tooltip = document.getElementById('tooltip');
+
+            cy.on('mouseover', 'node', function(e) {
+                const node = e.target;
+                if (node.isParent()) return;
+                if (node.data('entity_type') === 'junction') return;
+
+                const data = node.data();
+                let html = '';
+
+                const entityType = data.entity_type || '';
+                html += `<span class="tt-type ${entityType}">${entityType}</span><br>`;
+                html += `<span class="tt-fqn">${data.fqn || data.label}</span>`;
+
+                tooltip.innerHTML = html;
+                tooltip.style.display = 'block';
+            });
+
+            cy.on('mouseout', 'node', function() {
+                tooltip.style.display = 'none';
+            });
+
+            cy.on('mousemove', function(e) {
+                const pos = e.originalEvent || e;
+                tooltip.style.left = (pos.clientX + 14) + 'px';
+                tooltip.style.top = (pos.clientY + 14) + 'px';
+            });
+
+            // Highlight соседей при клике
+            cy.on('tap', 'node', function(e) {
+                const node = e.target;
+                if (node.isParent()) return;
+                if (node.data('entity_type') === 'junction') return;
+
+                const neighborhood = node.neighborhood().add(node);
+                cy.elements().addClass('faded');
+                neighborhood.removeClass('faded').addClass('highlighted');
+                // Also keep parent groups visible
+                cy.nodes(':parent').removeClass('faded');
+            });
+
+            // Снять highlight при клике на фон
+            cy.on('tap', function(e) {
+                if (e.target === cy) {
+                    cy.elements().removeClass('faded').removeClass('highlighted');
+                }
+            });
+        }
+
+        // Переключение видов
+        function switchView(view) {
+            currentView = view;
+
+            document.getElementById('btn-dag-view').classList.toggle('active', view === 'dag');
+            document.getElementById('btn-task-view').classList.toggle('active', view === 'task');
+
+            const selector = document.getElementById('task-selector');
+            const legendTaskGroup = document.getElementById('legend-task-group');
+
+            if (view === 'dag') {
+                selector.style.display = 'none';
+                legendTaskGroup.style.display = '';
+                const dagView = graphData.dag_view;
+                initCytoscape(dagView.elements);
+                document.getElementById('dag-title').textContent = 'DAG: ' + (graphData.dag_id || '');
+            } else {
+                selector.style.display = '';
+                legendTaskGroup.style.display = 'none';
+                if (selector.value) {
+                    showTask(selector.value);
+                } else if (selector.options.length > 0) {
+                    selector.selectedIndex = 0;
+                    showTask(selector.options[0].value);
+                }
+            }
+        }
+
+        function showTask(taskId) {
+            const taskView = graphData.task_views[taskId];
+            if (!taskView) return;
+
+            initCytoscape(taskView.elements);
+            document.getElementById('dag-title').textContent = 'Task: ' + taskId;
+        }
+
+        // Export PNG
+        function exportPNG() {
+            if (!cy) return;
+            const png = cy.png({
+                output: 'blob',
+                bg: '#fafafa',
+                scale: 2,
+                full: true,
+            });
+            const url = URL.createObjectURL(png);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = (graphData.dag_id || 'diagram') + '_lineage.png';
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+
+        // Инициализация при загрузке
+        window.addEventListener('DOMContentLoaded', function() {
+            if (!graphData) return;
+
+            // Заполняем selector задач
+            const selector = document.getElementById('task-selector');
+            const taskIds = Object.keys(graphData.task_views || {});
+            taskIds.forEach(function(tid) {
+                const opt = document.createElement('option');
+                opt.value = tid;
+                opt.textContent = tid;
+                selector.appendChild(opt);
+            });
+
+            // Начальный вид
+            const initialView = graphData.initial_view || 'dag';
+            switchView(initialView);
+        });
+    </script>
+</body>
+</html>

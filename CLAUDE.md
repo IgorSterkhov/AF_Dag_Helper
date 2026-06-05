@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project System Prompt
+
+Treat `CLAUDE.md` as the persistent project system prompt and the source of repository-level instructions. On every new session, look for system/project instructions in this file first. When long-lived system prompt instructions change, update `CLAUDE.md` instead of keeping them only in chat history.
+
+Work pragmatically: inspect the current structure and git status before edits, preserve user changes, keep commits scoped, and verify with the project commands before reporting completion.
+
 ## Project Overview
 
 AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating OMEntity (inlets/outlets) for OpenMetadata lineage tracking. It parses Python DAG files, extracts SQL queries, analyzes table references, and generates ready-to-use OMEntity code.

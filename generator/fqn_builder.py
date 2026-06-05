@@ -1,9 +1,16 @@
 """FQN Builder с маппингом серверов."""
 
 import fnmatch
+import re
 import yaml
 from pathlib import Path
 from typing import Optional, Dict
+
+
+# Префикс имени таблицы, кодирующий целевой сервер: `ch1_*`, `ch13_*`, `pg3_*`, `dm0_*`, ...
+# Используется для таблиц из схемы `remote` (обёртки ClickHouse remote()),
+# где реальный сервер не совпадает с подключением, в котором зарегистрирована таблица.
+_REMOTE_TABLE_PREFIX_RE = re.compile(r'^([a-z]+\d+)_', re.IGNORECASE)
 
 
 class FQNBuilder:
@@ -90,7 +97,27 @@ class FQNBuilder:
 
         Формат: server.remote_prefix.table
         Пример: do-ch13.remote_ch.oof_position_status_v3_rc
+
+        Для схемы 'remote' (обёртка ClickHouse remote()) пытаемся вывести реальный
+        сервер из префикса имени таблицы (`ch1_*` → `do-ch1`, `pg3_*` → `do-pg3`).
         """
-        server = self.get_server_name(connection_id)
+        conn = connection_id
+        if remote_prefix == 'remote':
+            inferred = self.infer_connection_from_table_name(table)
+            if inferred:
+                conn = inferred
+        server = self.get_server_name(conn)
         normalized_table = self.normalize_table_name(table)
         return f"{server}.{remote_prefix}.{normalized_table}"
+
+    def infer_connection_from_table_name(self, table: str) -> Optional[str]:
+        """
+        Выводит connection_id из префикса имени таблицы для схемы 'remote'.
+
+        Пример: 'ch1_supply_gtd_raw_rc' → 'do-ch1'; 'pg3_orders' → 'do-pg3'.
+        Возвращает None, если префикс не распознан.
+        """
+        match = _REMOTE_TABLE_PREFIX_RE.match(table)
+        if not match:
+            return None
+        return f"do-{match.group(1).lower()}"

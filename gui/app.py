@@ -37,6 +37,8 @@ class DAGHelperApp:
 
         self.analyzer = DAGAnalyzer(str(self.MAPPING_FILE))
         self.current_file = None
+        self.last_outputs = None  # List[OMEntityOutput] для диаграмм
+        self.last_dag_id = None
 
         self._create_widgets()
         self._bind_events()
@@ -161,6 +163,28 @@ class DAGHelperApp:
         )
         self.btn_clear.pack(side=tk.LEFT, padx=5)
 
+        # Разделитель
+        ttk.Separator(bottom_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+
+        # Кнопка диаграммы
+        self.btn_diagram = ttk.Button(
+            bottom_frame,
+            text="Interactive Diagram",
+            command=self._show_diagram
+        )
+        self.btn_diagram.pack(side=tk.LEFT, padx=5)
+
+        # Выбор вида диаграммы
+        self.diagram_view = tk.StringVar(value='dag')
+        ttk.Radiobutton(
+            bottom_frame, text="DAG view",
+            variable=self.diagram_view, value='dag'
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(
+            bottom_frame, text="Task view",
+            variable=self.diagram_view, value='task'
+        ).pack(side=tk.LEFT, padx=2)
+
         # Статус
         self.lbl_status = ttk.Label(bottom_frame, text="", foreground="gray")
         self.lbl_status.pack(side=tk.RIGHT, padx=5)
@@ -232,6 +256,8 @@ class DAGHelperApp:
             if self.force_mode.get():
                 result = self._analyze_dag_force(self.current_file)
             else:
+                self.last_outputs = None
+                self.last_dag_id = None
                 result = self.analyzer.analyze_dag(self.current_file)
 
             self.text_output.delete(1.0, tk.END)
@@ -286,6 +312,10 @@ class DAGHelperApp:
 
         # 5. Генерируем через OMEntityGenerator
         outputs = generator.generate_for_dag(dag_result, func_sql_results)
+
+        # Сохраняем для интерактивных диаграмм
+        self.last_outputs = outputs
+        self.last_dag_id = dag_result.dag_id or 'Unknown'
 
         if not outputs:
             return self._format_no_results_force(dag_result)
@@ -427,6 +457,36 @@ class DAGHelperApp:
             lines.append("# PythonOperator задачи не найдены")
 
         return "\n".join(lines)
+
+    def _show_diagram(self):
+        """Открывает интерактивную Cytoscape.js диаграмму."""
+        if not self.last_outputs:
+            if not self.force_mode.get():
+                messagebox.showinfo(
+                    "Информация",
+                    "Диаграммы доступны только в принудительном режиме.\n"
+                    "Включите галочку «Принудительно» и повторите анализ."
+                )
+            else:
+                messagebox.showwarning("Предупреждение", "Сначала выполните анализ DAG файла")
+            return
+
+        from visualizer.cytoscape_diagram import CytoscapeGraphBuilder
+        from visualizer.cytoscape_viewer import CytoscapeViewer
+
+        builder = CytoscapeGraphBuilder()
+        graph_data = builder.build_full_data(self.last_outputs, self.last_dag_id)
+        graph_data['initial_view'] = self.diagram_view.get()
+
+        viewer = CytoscapeViewer()
+        title = f'Lineage: {self.last_dag_id}'
+
+        if not viewer.has_pywebview:
+            self.lbl_status.config(text="Открыто в браузере (pip install pywebview для нативного окна)")
+        else:
+            self.lbl_status.config(text="Диаграмма открыта")
+
+        viewer.show(graph_data, title)
 
     def _highlight_syntax(self):
         """Простая подсветка синтаксиса."""

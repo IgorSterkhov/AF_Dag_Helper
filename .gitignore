@@ -22,6 +22,9 @@ dist/
 # Config with local paths (auto-generated)
 config/settings.yaml
 
+# Generated diagram previews
+test_*.html
+
 # OS
 .DS_Store
 Thumbs.db

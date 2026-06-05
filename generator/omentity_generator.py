@@ -143,14 +143,15 @@ class OMEntityGenerator:
                 # Пропускаем SQL flow если cross-server уже покрыл те же таблицы
                 if sf_inlet_fqns <= cs_inlet_fqns and sf_outlet_fqns <= cs_outlet_fqns:
                     continue
-                # Определяем connection по FQN первого элемента
-                all_fqns = list(sf_inlet_fqns | sf_outlet_fqns)
-                if all_fqns:
-                    first_server = all_fqns[0].split('.')[0] if '.' in all_fqns[0] else ''
-                    if first_server == primary_server:
-                        sql_primary.append(sf)
-                    else:
-                        sql_other.append(sf)
+                # Классифицируем по outlet: если данные пишутся на primary — flow primary.
+                # Если outlet-ов нет — смотрим на первый inlet.
+                servers = [o.fqn.split('.', 1)[0] for o in sf.outlets if '.' in o.fqn]
+                if not servers:
+                    servers = [i.fqn.split('.', 1)[0] for i in sf.inlets if '.' in i.fqn]
+                if servers and servers[0] == primary_server:
+                    sql_primary.append(sf)
+                elif servers:
+                    sql_other.append(sf)
                 else:
                     sql_primary.append(sf)
 
