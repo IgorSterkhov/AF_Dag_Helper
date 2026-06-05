@@ -176,6 +176,7 @@ class RepositoryBrowserTest(unittest.TestCase):
                 git_metadata.return_value = {
                     "dags/daily/sales.py": {
                         "git_author": "Ivan Petrov",
+                        "git_date": "2026-06-04T18:21:00+04:00",
                         "git_message": "fix schedule window for daily DAG",
                     }
                 }
@@ -195,9 +196,11 @@ class RepositoryBrowserTest(unittest.TestCase):
             self.assertEqual(by_id["file:dags/daily/sales.py"]["type"], "file")
             self.assertEqual(by_id["file:dags/daily/sales.py"]["level"], 2)
             self.assertEqual(by_id["file:dags/daily/sales.py"]["node_id"], "file:dags/daily/sales.py")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["mtime"], "2026-06-04T18:21:00+04:00")
+            self.assertEqual(by_id["file:dags/daily/sales.py"]["mtime_display"], "2026-06-04 18:21")
             self.assertEqual(by_id["file:dags/daily/sales.py"]["git_author"], "Ivan Petrov")
             self.assertEqual(by_id["file:dags/daily/sales.py"]["git_message_short"], "fix schedule window ")
-            self.assertIn("mtime_display", by_id["file:dags/daily/sales.py"])
+            self.assertEqual(by_id["file:root_dag.py"]["mtime_display"], "-")
             self.assertEqual(by_id["file:root_dag.py"]["git_author"], "-")
 
     def test_build_dag_index_ignores_symlinked_entries_outside_repository(self):
@@ -225,10 +228,10 @@ class RepositoryBrowserTest(unittest.TestCase):
             with patch("web.repository_browser.subprocess.run") as run:
                 run.return_value.returncode = 0
                 run.return_value.stdout = (
-                    "\x1eIvan Petrov\x1ffix schedule window for daily DAG\n"
+                    "\x1eIvan Petrov\x1f2026-06-04T18:21:00+04:00\x1ffix schedule window for daily DAG\n"
                     "dags/daily/sales.py\n"
                     "\n"
-                    "\x1eAnna Sidorova\x1fadd retry handling\n"
+                    "\x1eAnna Sidorova\x1f2026-06-01T11:07:00+04:00\x1fadd retry handling\n"
                     "root_dag.py\n"
                 )
 
@@ -236,7 +239,9 @@ class RepositoryBrowserTest(unittest.TestCase):
 
             run.assert_called_once()
             self.assertIn("log", run.call_args.args[0])
+            self.assertTrue(any("%cI" in argument for argument in run.call_args.args[0]))
             self.assertEqual(metadata["dags/daily/sales.py"]["git_author"], "Ivan Petrov")
+            self.assertEqual(metadata["dags/daily/sales.py"]["git_date"], "2026-06-04T18:21:00+04:00")
             self.assertEqual(metadata["dags/daily/sales.py"]["git_message"], "fix schedule window for daily DAG")
             self.assertEqual(metadata["root_dag.py"]["git_author"], "Anna Sidorova")
 

@@ -193,6 +193,12 @@ class WebAppTest(unittest.TestCase):
             element.get("props", {}).get("label") or element.get("text")
             for element in dialog_descendants
         }
+        table_columns = [
+            column
+            for element in dialog_descendants
+            if element["tag"] == "nicegui-table"
+            for column in element.get("props", {}).get("columns", [])
+        ]
         placeholders = {
             element.get("props", {}).get("placeholder")
             for element in dialog_descendants
@@ -209,6 +215,7 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("Cancel", labels)
         self.assertIn("refresh", icons)
         self.assertTrue(any(element["tag"] == "nicegui-table" for element in dialog_descendants))
+        self.assertIn("Commit date", {column.get("label") for column in table_columns})
 
     def test_visible_dag_picker_rows_respect_expanded_dirs_and_search(self):
         import web.app as web_app

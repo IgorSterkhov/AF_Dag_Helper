@@ -1,6 +1,5 @@
 """Safe server-side git repository discovery and DAG browsing."""
 
-from datetime import datetime
 import json
 import subprocess
 from pathlib import Path
@@ -91,6 +90,10 @@ class RepositoryBrowser:
                 continue
             git_metadata = metadata.get(node["path"], {})
             message = git_metadata.get("git_message", "")
+            commit_date = git_metadata.get("git_date", "")
+            if commit_date:
+                node["mtime"] = commit_date
+                node["mtime_display"] = self._display_commit_date(commit_date)
             node["git_author"] = git_metadata.get("git_author") or "-"
             node["git_message"] = message or "-"
             node["git_message_short"] = message[:20] if message else "-"
@@ -246,8 +249,6 @@ class RepositoryBrowser:
             path_text = relative_path.as_posix()
             parent_path = relative_path.parent.as_posix()
             parent_id = None if parent_path == "." else f"dir:{parent_path}"
-            stat = (repo_path / relative_path).stat()
-            modified = datetime.fromtimestamp(stat.st_mtime)
             nodes.append({
                 "id": f"file:{path_text}",
                 "node_id": f"file:{path_text}",
@@ -257,8 +258,8 @@ class RepositoryBrowser:
                 "parent": parent_id,
                 "level": len(relative_path.parts) - 1,
                 "children_count": 0,
-                "mtime": modified.isoformat(timespec="seconds"),
-                "mtime_display": modified.strftime("%Y-%m-%d %H:%M"),
+                "mtime": "",
+                "mtime_display": "-",
                 "git_author": "-",
                 "git_message": "-",
                 "git_message_short": "-",
@@ -268,7 +269,7 @@ class RepositoryBrowser:
     def _git_metadata_for_python_files(self, repo_path: Path) -> Dict[str, Dict[str, str]]:
         try:
             result = subprocess.run(
-                ["git", "-C", str(repo_path), "log", "--format=format:%x1e%an%x1f%s", "--name-only", "--"],
+                ["git", "-C", str(repo_path), "log", "--format=format:%x1e%an%x1f%cI%x1f%s", "--name-only", "--"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -281,6 +282,7 @@ class RepositoryBrowser:
 
         metadata: Dict[str, Dict[str, str]] = {}
         author = ""
+        commit_date = ""
         message = ""
         for raw_line in result.stdout.split("\n"):
             line = raw_line.rstrip()
@@ -289,17 +291,24 @@ class RepositoryBrowser:
             if line.startswith("\x1e"):
                 payload = line[1:]
                 if "\x1f" in payload:
-                    author, message = payload.split("\x1f", 1)
+                    parts = payload.split("\x1f", 2)
+                    author = parts[0]
+                    commit_date = parts[1] if len(parts) > 1 else ""
+                    message = parts[2] if len(parts) > 2 else ""
                 else:
-                    author, message = payload, ""
+                    author, commit_date, message = payload, "", ""
                 continue
             path = line.replace("\\", "/")
             if path.endswith(".py") and path not in metadata:
                 metadata[path] = {
                     "git_author": author,
+                    "git_date": commit_date,
                     "git_message": message,
                 }
         return metadata
+
+    def _display_commit_date(self, commit_date: str) -> str:
+        return commit_date[:16].replace("T", " ") if len(commit_date) >= 16 else commit_date or "-"
 
     def _repo_revision(self, repo_path: Path) -> str:
         try:

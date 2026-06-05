@@ -494,7 +494,7 @@ def create_ui():
 
     dag_picker_columns = [
         {"name": "name", "label": "Name", "field": "name", "align": "left", "sortable": True},
-        {"name": "mtime_display", "label": "Modified", "field": "mtime_display", "align": "left", "sortable": True},
+        {"name": "mtime_display", "label": "Commit date", "field": "mtime_display", "align": "left", "sortable": True},
         {"name": "git_author", "label": "Author", "field": "git_author", "align": "left", "sortable": True},
         {"name": "git_message_short", "label": "Commit", "field": "git_message_short", "align": "left", "sortable": True},
     ]
