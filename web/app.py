@@ -64,18 +64,11 @@ def create_ui():
         with ui.card().classes("w-1/3 min-w-[360px]"):
             ui.label("Source").classes("text-h6")
             with ui.tabs().classes("w-full") as source_tabs:
-                server_tab = ui.tab("Server file")
-                upload_tab = ui.tab("Upload")
-                paste_tab = ui.tab("Paste")
+                server_tab = ui.tab("server", label="Server file")
+                upload_tab = ui.tab("upload", label="Upload")
+                paste_tab = ui.tab("paste", label="Paste")
 
             server_files = browser.list_dag_files()
-            selected_file = ui.select(
-                server_files,
-                label="DAG file",
-                value=server_files[0] if server_files else None,
-            ).classes("w-full")
-            paste_area = ui.textarea(label="Paste DAG source").classes("w-full").props("rows=12")
-            upload_label = ui.label("No file uploaded")
 
             def on_upload(event):
                 content = event.content.read()
@@ -86,12 +79,16 @@ def create_ui():
             with ui.tab_panels(source_tabs, value=server_tab).classes("w-full"):
                 with ui.tab_panel(server_tab):
                     ui.label("Choose a DAG from allowed project folders.")
-                    selected_file
+                    selected_file = ui.select(
+                        server_files,
+                        label="DAG file",
+                        value=server_files[0] if server_files else None,
+                    ).classes("w-full")
                 with ui.tab_panel(upload_tab):
                     ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
-                    upload_label
+                    upload_label = ui.label("No file uploaded")
                 with ui.tab_panel(paste_tab):
-                    paste_area
+                    paste_area = ui.textarea(label="Paste DAG source").classes("w-full").props("rows=12")
 
             force = ui.checkbox("Force all tasks", value=True)
             compare = ui.checkbox("Compare existing OMEntity", value=True)
@@ -131,11 +128,11 @@ def create_ui():
 
     def resolve_current_dag_path() -> Path:
         active_tab = source_tabs.value
-        if active_tab in (server_tab, "Server file"):
+        if active_tab == "server":
             if not selected_file.value:
                 raise ValueError("No server DAG file selected")
             return browser.resolve(selected_file.value)
-        if active_tab in (upload_tab, "Upload"):
+        if active_tab == "upload":
             if not state.uploaded_source:
                 raise ValueError("Upload a .py DAG first")
             return service.write_source_to_runtime_file(state.uploaded_name, state.uploaded_source)
