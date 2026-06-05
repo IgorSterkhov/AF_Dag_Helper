@@ -83,6 +83,27 @@ ssh ivm-1 'cat /home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env'
 ssh ivm-1 'sudo systemctl restart af-dags-helper.service'
 ```
 
+### 6. Терминальное управление ivm-1
+
+Интерактивное меню со стрелками:
+
+```bash
+scripts/ivm1_ops.sh
+```
+
+Полезные прямые команды:
+
+```bash
+scripts/ivm1_ops.sh deploy       # выполнить деплой
+scripts/ivm1_ops.sh health       # проверить /health и авторизацию web UI
+scripts/ivm1_ops.sh status       # статус systemd-сервиса
+scripts/ivm1_ops.sh follow       # смотреть логи в реальном времени
+scripts/ivm1_ops.sh logs         # последние логи
+scripts/ivm1_ops.sh version      # локальный и развернутый git SHA
+scripts/ivm1_ops.sh restart      # перезапустить сервис
+scripts/ivm1_ops.sh credentials  # показать логин/пароль web UI
+```
+
 ## Использование GUI
 
 Основное окно:

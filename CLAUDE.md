@@ -38,6 +38,14 @@ python main.py path/to/dag.py config/server_mapping.yaml
 # Deploy web UI to ivm-1
 scripts/deploy_ivm1.sh
 
+# Terminal ops menu for ivm-1
+scripts/ivm1_ops.sh
+scripts/ivm1_ops.sh health
+scripts/ivm1_ops.sh status
+scripts/ivm1_ops.sh follow
+scripts/ivm1_ops.sh version
+scripts/ivm1_ops.sh deploy
+
 # Show deployed web UI credentials
 ssh ivm-1 'cat /home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env'
 ```
