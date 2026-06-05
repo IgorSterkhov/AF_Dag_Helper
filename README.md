@@ -8,6 +8,7 @@
 
 - Python 3.9+
 - Windows (пути к venv предполагают `venv\Scripts\`)
+- Для web UI: FastAPI + NiceGUI (см. `requirements.txt`)
 - Для интерактивных диаграмм (опционально): `pip install pywebview`
 
 ## Установка и запуск
@@ -39,7 +40,15 @@ python gui\app.py
 "c:\DevWB\AF Dags Helper\venv\Scripts\python.exe" "c:\DevWB\AF Dags Helper\gui\app.py"
 ```
 
-### 3. Установка зависимостей (если venv пустой)
+### 3. Запуск Web UI
+
+```cmd
+python -m web.app --host 127.0.0.1 --port 8000
+```
+
+Открыть в браузере: `http://127.0.0.1:8000`.
+
+### 4. Установка зависимостей (если venv пустой)
 
 ```cmd
 pip install -r requirements.txt
@@ -48,8 +57,17 @@ pip install -r requirements.txt
 Зависимости:
 - `sqlglot>=23.0.0` — парсинг SQL (диалект ClickHouse)
 - `pyyaml>=6.0` — конфиги
+- `fastapi`, `nicegui`, `uvicorn`, `python-multipart`, `httpx` — web UI
 - `tkinter` — встроен в Python
 - `pywebview` (опционально) — нативное окно для интерактивных диаграмм
+
+### 5. Деплой на ivm-1
+
+```bash
+scripts/deploy_ivm1.sh
+```
+
+Скрипт разворачивает `master` в `~/dev/af_dags_helper` на `ivm-1`, создаёт `.venv`, устанавливает зависимости и перезапускает `af-dags-helper.service` на порту `8000`.
 
 ## Использование GUI
 
@@ -152,6 +170,7 @@ config/          server_mapping.yaml, settings.yaml
 Dags for test/   DAG без OMEntity (вход)
 Dags samples/    DAG с эталонным OMEntity (для сравнения)
 main.py          CLI / класс DAGAnalyzer
+web/             FastAPI + NiceGUI web UI
 test_against_samples.py   сравнение с эталонами
 ```
 

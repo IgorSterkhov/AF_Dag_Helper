@@ -24,11 +24,17 @@ AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating 
 # GUI application
 python gui/app.py
 
+# Web UI
+python -m web.app --host 127.0.0.1 --port 8000
+
 # CLI - analyze a single DAG file
 python main.py path/to/dag.py
 
 # CLI - with custom server mapping
 python main.py path/to/dag.py config/server_mapping.yaml
+
+# Deploy web UI to ivm-1
+scripts/deploy_ivm1.sh
 ```
 
 ## Architecture
@@ -49,6 +55,8 @@ FQNBuilder
     ↓ applies: server_mapping.yaml (connection_id → server_name)
 OMEntityGenerator
     ↓ outputs: formatted Python code with inlets/outlets (TABLE and API entities)
+FastAPI + NiceGUI web UI
+    ↓ exposes: upload/paste/server-file analysis, generated output, diff, diagrams
 ```
 
 **Key classes:**
@@ -58,6 +66,8 @@ OMEntityGenerator
 - `ConnectionResolver` ([analyzer/connection_resolver.py](analyzer/connection_resolver.py)) - connection ID resolution
 - `FQNBuilder` ([generator/fqn_builder.py](generator/fqn_builder.py)) - FQN construction with mapping
 - `OMEntityGenerator` ([generator/omentity_generator.py](generator/omentity_generator.py)) - code generation
+- `DAGAnalysisService` ([web/analysis_service.py](web/analysis_service.py)) - shared analysis workflow for web UI
+- `web.app` ([web/app.py](web/app.py)) - FastAPI + NiceGUI application and `/health`
 
 ## OMEntity Format
 
