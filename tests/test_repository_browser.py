@@ -102,6 +102,64 @@ class RepositoryBrowserTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 browser.resolve_dag_path("repo_a", "file:../outside.py")
 
+    def test_lists_directory_for_dag_picker_navigation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            (repo / ".git").mkdir(parents=True)
+            (repo / "dags" / "daily").mkdir(parents=True)
+            (repo / "dags" / "daily" / "sales.py").write_text("print('sales')", encoding="utf-8")
+            (repo / "dags" / "daily" / "notes.txt").write_text("ignore", encoding="utf-8")
+            (repo / "root_dag.py").write_text("print('root')", encoding="utf-8")
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            root_listing = browser.list_directory("repo_a")
+            nested_listing = browser.list_directory("repo_a", "dags/daily")
+
+            self.assertEqual(root_listing["current"], "")
+            self.assertIsNone(root_listing["parent"])
+            self.assertEqual(root_listing["directories"], [{"name": "dags", "path": "dags"}])
+            self.assertEqual(root_listing["files"], [{"name": "root_dag.py", "node_id": "file:root_dag.py", "path": "root_dag.py"}])
+
+            self.assertEqual(nested_listing["current"], "dags/daily")
+            self.assertEqual(nested_listing["parent"], "dags")
+            self.assertEqual(nested_listing["directories"], [])
+            self.assertEqual(nested_listing["files"], [
+                {"name": "sales.py", "node_id": "file:dags/daily/sales.py", "path": "dags/daily/sales.py"}
+            ])
+
+    def test_list_directory_rejects_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            (repo / ".git").mkdir(parents=True)
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            with self.assertRaises(ValueError):
+                browser.list_directory("repo_a", "../")
+
+    def test_list_directory_ignores_symlinked_entries_outside_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            outside = root / "outside"
+            (repo / ".git").mkdir(parents=True)
+            outside.mkdir()
+            (outside / "leak.py").write_text("print('leak')", encoding="utf-8")
+            try:
+                (repo / "external").symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks are not available: {exc}")
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            listing = browser.list_directory("repo_a")
+
+            self.assertEqual(listing["directories"], [])
+            self.assertEqual(listing["files"], [])
+
     def test_pull_repository_uses_git_without_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

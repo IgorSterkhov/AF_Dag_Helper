@@ -42,6 +42,7 @@ class WebState:
         self.dag_id = ""
         self.selected_repo: Optional[str] = None
         self.selected_dag_node: Optional[str] = None
+        self.picker_dir = ""
 
 
 def create_ui():
@@ -122,12 +123,17 @@ def create_ui():
             border: 1px solid #ddd;
             border-radius: 6px;
           }
-          .repo-tree {
-            max-height: 320px;
+          .dag-picker-list {
+            max-height: 58vh;
             overflow: auto;
             border: 1px solid #ddd;
             border-radius: 6px;
-            padding: 4px;
+            padding: 8px;
+          }
+          .dag-picker-entry {
+            width: 100%;
+            justify-content: flex-start;
+            text-align: left;
           }
         </style>
         """
@@ -140,22 +146,15 @@ def create_ui():
         registered = set(registered_repo_names())
         return [name for name in repository_browser.discover_repositories() if name not in registered]
 
-    def load_repo_tree():
+    def clear_selected_dag():
+        state.selected_dag_node = None
+        state.picker_dir = ""
+        selected_dag_label.set_text("No DAG selected")
+
+    def refresh_selected_repo():
         selected_repo = repo_select.value
         state.selected_repo = selected_repo
-        state.selected_dag_node = None
-        selected_dag_label.set_text("No DAG selected")
-        dag_tree.props["selected"] = None
-        if not selected_repo:
-            dag_tree.props["nodes"] = []
-            dag_tree.update()
-            return
-        try:
-            dag_tree.props["nodes"] = repository_browser.build_dag_tree(selected_repo)
-        except Exception as exc:
-            dag_tree.props["nodes"] = []
-            ui.notify(f"Failed to load repository tree: {exc}", type="negative", close_button=True)
-        dag_tree.update()
+        clear_selected_dag()
 
     def refresh_repo_controls(preferred_repo: Optional[str] = None):
         registered = registered_repo_names()
@@ -166,20 +165,76 @@ def create_ui():
         settings_registered_select.set_options(registered, value=selected_repo)
         addable = addable_repo_names()
         settings_discovered_select.set_options(addable, value=addable[0] if addable else None)
-        load_repo_tree()
+        refresh_selected_repo()
 
     def on_repo_change(_event=None):
-        load_repo_tree()
+        refresh_selected_repo()
 
-    def on_dag_select(event):
-        node_id = event.value
-        if not node_id or not str(node_id).startswith("file:"):
-            state.selected_dag_node = None
-            selected_dag_label.set_text("Select a .py DAG file")
+    def render_dag_picker():
+        picker_list.clear()
+        selected_repo = repo_select.value
+        with picker_list:
+            if not selected_repo:
+                state.picker_dir = ""
+                picker_path_label.set_text("Current folder: /")
+                ui.label("Select a repository first.").classes("text-grey-7")
+                return
+            try:
+                listing = repository_browser.list_directory(selected_repo, state.picker_dir)
+            except Exception as exc:
+                picker_path_label.set_text("Current folder: /")
+                ui.label(f"Failed to load DAG folder: {exc}").classes("text-negative")
+                return
+
+            state.picker_dir = listing["current"]
+            current_label = f"/{state.picker_dir}" if state.picker_dir else "/"
+            picker_path_label.set_text(f"Current folder: {current_label}")
+
+            if not listing["directories"] and not listing["files"]:
+                ui.label("No folders or .py DAG files here.").classes("text-grey-7")
+
+            for directory in listing["directories"]:
+                ui.button(
+                    directory["name"],
+                    icon="folder",
+                    on_click=lambda path=directory["path"]: navigate_dag_picker(path),
+                ).props("flat align=left").classes("dag-picker-entry")
+
+            for dag_file in listing["files"]:
+                ui.button(
+                    dag_file["name"],
+                    icon="description",
+                    on_click=lambda file=dag_file: select_dag_from_picker(file),
+                ).props("flat align=left").classes("dag-picker-entry")
+
+    def navigate_dag_picker(path: str):
+        state.picker_dir = "" if path in {"", "."} else path.strip("/")
+        render_dag_picker()
+
+    def go_picker_up():
+        if not state.picker_dir:
             return
+        parent = Path(state.picker_dir).parent.as_posix()
+        navigate_dag_picker("" if parent == "." else parent)
+
+    def select_dag_from_picker(dag_file):
         state.selected_repo = repo_select.value
-        state.selected_dag_node = str(node_id)
-        selected_dag_label.set_text(f"Selected DAG: {str(node_id).removeprefix('file:')}")
+        state.selected_dag_node = dag_file["node_id"]
+        selected_dag_label.set_text(f"Selected DAG: {dag_file['path']}")
+        dag_picker_dialog.close()
+
+    def open_dag_picker():
+        if not repo_select.value:
+            ui.notify("Select a repository first", type="warning")
+            return
+        if state.selected_dag_node and state.selected_repo == repo_select.value:
+            selected_path = Path(state.selected_dag_node.removeprefix("file:"))
+            parent = selected_path.parent.as_posix()
+            state.picker_dir = "" if parent == "." else parent
+        else:
+            state.picker_dir = ""
+        render_dag_picker()
+        dag_picker_dialog.open()
 
     def add_selected_repository():
         repo_name = settings_discovered_select.value
@@ -249,7 +304,7 @@ def create_ui():
             для `inlets` и `outlets`.
 
             **Workflow:** выберите исходник во вкладках Source: Repo, Upload или Paste. Во вкладке Repo сначала
-            выберите зарегистрированный репозиторий, затем раскройте дерево папок и выберите `.py` DAG. При
+            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в окне навигации. При
             необходимости включите Force all tasks для пересчета всех задач и Compare existing OMEntity для
             сравнения с уже прописанными сущностями. Затем нажмите Analyze.
 
@@ -289,6 +344,15 @@ def create_ui():
         with ui.row().classes("w-full justify-end"):
             ui.button("Close", on_click=settings_dialog.close)
 
+    with ui.dialog() as dag_picker_dialog, ui.card().classes("max-w-[820px] w-full"):
+        ui.label("Select DAG").classes("text-h6")
+        with ui.row().classes("w-full items-center"):
+            ui.button("Up", icon="arrow_upward", on_click=go_picker_up).props("flat")
+            picker_path_label = ui.label("Current folder: /").classes("text-caption text-grey-7")
+        picker_list = ui.column().classes("dag-picker-list w-full")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Cancel", on_click=dag_picker_dialog.close)
+
     with ui.header().classes("items-center"):
         ui.label("AF DAGs Helper").classes("text-h6")
         ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
@@ -315,9 +379,9 @@ def create_ui():
                     repo_select = ui.select([], label="Repository", on_change=on_repo_change).classes("w-full")
                     selected_dag_label = ui.label("No DAG selected")
                     with ui.row().classes("w-full"):
+                        ui.button("Browse DAG...", icon="folder_open", on_click=open_dag_picker)
                         ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
                         ui.button("Git pull", icon="download", on_click=pull_current_repository)
-                    dag_tree = ui.tree([], on_select=on_dag_select).classes("repo-tree w-full")
                 with ui.tab_panel(upload_tab):
                     ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
                     upload_label = ui.label("No file uploaded")

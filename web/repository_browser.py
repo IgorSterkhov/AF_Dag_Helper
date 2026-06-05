@@ -75,6 +75,48 @@ class RepositoryBrowser:
             raise ValueError(f"DAG file is outside repository: {relative_path}")
         return candidate
 
+    def list_directory(self, name: str, relative_dir: str = "") -> Dict:
+        repo_path = self._registered_repo_path(name)
+        relative_dir = relative_dir.strip("/")
+        current_path = (repo_path / relative_dir).resolve()
+        if not self._is_within(current_path, repo_path):
+            raise ValueError(f"Directory is outside repository: {relative_dir}")
+        if not current_path.exists() or not current_path.is_dir():
+            raise ValueError(f"Directory does not exist: {relative_dir}")
+
+        current = current_path.relative_to(repo_path).as_posix()
+        if current == ".":
+            current = ""
+        parent = None
+        if current:
+            parent_path = Path(current).parent
+            parent = "" if parent_path.as_posix() == "." else parent_path.as_posix()
+
+        directories = []
+        files = []
+        for child in sorted(current_path.iterdir(), key=lambda path: path.name.lower()):
+            if child.name.startswith("."):
+                continue
+            resolved_child = child.resolve()
+            if not self._is_within(resolved_child, repo_path):
+                continue
+            relative_child = resolved_child.relative_to(repo_path).as_posix()
+            if child.is_dir():
+                directories.append({"name": child.name, "path": relative_child})
+            elif child.is_file() and child.suffix == ".py":
+                files.append({
+                    "name": child.name,
+                    "node_id": f"file:{relative_child}",
+                    "path": relative_child,
+                })
+
+        return {
+            "current": current,
+            "parent": parent,
+            "directories": directories,
+            "files": files,
+        }
+
     def pull_repository(self, name: str) -> str:
         repo_path = self._registered_repo_path(name)
         result = subprocess.run(

@@ -121,7 +121,7 @@ class WebAppTest(unittest.TestCase):
         self.assertNotIn("Server file", tabs)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
-    def test_repo_tab_contains_repository_select_and_tree(self):
+    def test_repo_tab_contains_repository_select_and_browse_button(self):
         with tempfile.TemporaryDirectory() as tmp:
             repos_root = Path(tmp)
             repo = repos_root / "analytics"
@@ -148,7 +148,42 @@ class WebAppTest(unittest.TestCase):
                 for element in descendants
             )
         )
-        self.assertTrue(any(element["tag"] == "q-tree" for element in descendants))
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("label") == "Browse DAG..."
+                and element.get("props", {}).get("icon") == "folder_open"
+                for element in descendants
+            )
+        )
+        self.assertFalse(any(element["tag"] == "q-tree" for element in descendants))
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_dag_picker_dialog_contains_navigation_controls(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        dialogs = [element for element in elements.values() if element["tag"] == "nicegui-dialog"]
+        dialog_descendants = [
+            descendant
+            for dialog in dialogs
+            for descendant in _descendants(elements, dialog)
+        ]
+        labels = {
+            element.get("props", {}).get("label") or element.get("text")
+            for element in dialog_descendants
+        }
+        icons = {
+            element.get("props", {}).get("icon")
+            for element in dialog_descendants
+            if element["tag"] == "q-btn"
+        }
+
+        self.assertIn("Select DAG", labels)
+        self.assertIn("Up", labels)
+        self.assertIn("Current folder: /", labels)
+        self.assertIn("arrow_upward", icons)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_settings_dialog_contains_repository_actions(self):
