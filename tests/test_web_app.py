@@ -80,6 +80,7 @@ class WebAppTest(unittest.TestCase):
 
         self.assertEqual(help_button["tag"], "q-btn")
         self.assertEqual(help_button.get("props", {}).get("icon"), "help_outline")
+        self.assertEqual(help_button.get("props", {}).get("text-color"), "white")
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_result_tabs_own_their_content_widgets(self):

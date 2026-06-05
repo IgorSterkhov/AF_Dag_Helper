@@ -145,7 +145,7 @@ def create_ui():
 
     with ui.header().classes("items-center"):
         ui.label("AF DAGs Helper").classes("text-h6")
-        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense").tooltip("Справка")
+        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
         ui.space()
 
     with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):
