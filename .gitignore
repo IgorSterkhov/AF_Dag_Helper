@@ -22,8 +22,14 @@ dist/
 # Config with local paths (auto-generated)
 config/settings.yaml
 
+# Runtime state and uploads
+.runtime/
+
 # Generated diagram previews
 test_*.html
+
+# Superpowers brainstorming companion state
+.superpowers/
 
 # OS
 .DS_Store
