@@ -29,7 +29,7 @@
 
 - [ ] Write failing tests that the source tab is labeled `Repo`, the header has a settings gear button, settings modal exposes repository actions, and the Repo panel contains repository selection plus a tree.
 - [ ] Run `./venv/Scripts/python.exe -m unittest tests.test_web_app -v` and verify RED.
-- [ ] Instantiate `RepositoryBrowser` with `AF_DAGS_HELPER_REPOS_DIR` defaulting to `<project_root>/repos` and registry under the existing runtime directory.
+- [ ] Instantiate `RepositoryBrowser` with `AF_DAGS_HELPER_REPOS_DIR` defaulting to `~/repos` and registry under the existing runtime directory.
 - [ ] Replace `Server file` UI with Repo selection, DAG tree, selected DAG label, refresh and git pull actions.
 - [ ] Add settings modal with registered/discovered lists and add/remove/pull actions.
 - [ ] Update `resolve_current_dag_path()` to resolve selected repo DAGs through `RepositoryBrowser`.

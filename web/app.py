@@ -49,7 +49,7 @@ def create_ui():
     mapping_file = Path(os.environ.get("AF_DAGS_HELPER_MAPPING_FILE", project_root / "config" / "server_mapping.yaml"))
     runtime_dir = Path(os.environ.get("AF_DAGS_HELPER_RUNTIME_DIR", project_root / ".runtime" / "uploads"))
     service = DAGAnalysisService(project_root, mapping_file, runtime_dir=runtime_dir)
-    repos_root = Path(os.environ.get("AF_DAGS_HELPER_REPOS_DIR", project_root / "repos"))
+    repos_root = Path(os.environ.get("AF_DAGS_HELPER_REPOS_DIR", Path.home() / "repos"))
     repository_registry = Path(os.environ.get(
         "AF_DAGS_HELPER_REPOSITORY_REGISTRY",
         runtime_dir.parent / "repositories.json",

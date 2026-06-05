@@ -6,7 +6,7 @@ Add server-side DAG repository support to the NiceGUI web UI so users can regist
 
 ## Repository Scope
 
-Repositories are existing directories under `AF_DAGS_HELPER_REPOS_DIR`, defaulting to `<project_root>/repos`. The UI never clones remote URLs and never operates outside that root. A folder is considered addable when it is a direct child of the repos root and contains `.git`.
+Repositories are existing directories under `AF_DAGS_HELPER_REPOS_DIR`, defaulting to `~/repos` locally and `/home/igor.sterhov/repos` in the ivm-1 deployment. The UI never clones remote URLs and never operates outside that root. A folder is considered addable when it is a direct child of the repos root and contains `.git`.
 
 Registered repositories are stored in `<runtime_dir>/repositories.json`. The stored value is only the repository directory name, not an arbitrary path. Removing a repository unregisters it from the web UI and does not delete files on disk.
 

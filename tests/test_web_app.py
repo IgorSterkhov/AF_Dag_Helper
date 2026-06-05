@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -171,6 +172,20 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("Remove", labels)
         self.assertIn("Git pull selected", labels)
         self.assertIn("Git pull all", labels)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_default_repositories_root_is_user_home_repos(self):
+        os.environ.pop("AF_DAGS_HELPER_REPOS_DIR", None)
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+        markdown = [
+            element.get("props", {}).get("innerHTML", "")
+            for element in elements.values()
+            if element["tag"] == "nicegui-markdown"
+        ]
+
+        self.assertTrue(any(str(Path.home() / "repos") in content for content in markdown))
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_result_tabs_own_their_content_widgets(self):

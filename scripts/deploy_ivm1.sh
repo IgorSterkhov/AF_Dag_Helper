@@ -42,7 +42,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 
 AUTH_ENV="$APP_DIR/.runtime/auth.env"
-REPOS_DIR="$APP_DIR/repos"
+REPOS_DIR="${AF_DAGS_HELPER_REPOS_DIR:-/home/igor.sterhov/repos}"
 mkdir -p "$(dirname "$AUTH_ENV")"
 mkdir -p "$REPOS_DIR"
 if [ ! -f "$AUTH_ENV" ]; then
