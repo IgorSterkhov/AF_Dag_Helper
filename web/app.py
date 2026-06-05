@@ -57,10 +57,32 @@ def create_ui():
         """
     )
 
+    with ui.dialog() as help_dialog, ui.card().classes("max-w-[720px]"):
+        ui.label("Справка по AF DAGs Helper").classes("text-h6")
+        ui.markdown(
+            """
+            **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
+            для `inlets` и `outlets`.
+
+            **Как пользоваться:** выберите DAG на сервере, загрузите `.py` файл или вставьте код во вкладке Paste,
+            затем нажмите Analyze.
+
+            **Результаты:** Generated OMEntity содержит готовый код, Difference показывает отличие от существующего
+            `OMEntity`, Text Diagram даёт текстовую схему, Interactive Diagram показывает граф lineage,
+            Warnings содержит предупреждения парсера.
+
+            **Опции:** Force all tasks пересчитывает все задачи, Compare existing OMEntity включает сравнение,
+            DAG view / Task view меняет начальный вид интерактивной диаграммы.
+            """
+        )
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Закрыть", on_click=help_dialog.close)
+
     with ui.header().classes("items-center"):
         ui.label("AF DAGs Helper").classes("text-h6")
         ui.space()
         ui.label("FastAPI + NiceGUI").classes("text-caption")
+        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round").tooltip("Справка")
 
     with ui.row().classes("w-full no-wrap items-start q-pa-md"):
         with ui.card().classes("w-1/3 min-w-[360px]"):
@@ -110,23 +132,17 @@ def create_ui():
                 graph_tab = ui.tab("Interactive Diagram")
                 warnings_tab = ui.tab("Warnings")
 
-            generated = ui.codemirror("", language="Python").classes("w-full result-editor")
-            diff = ui.codemirror("", language="Markdown").classes("w-full result-editor")
-            text_diagram = ui.codemirror("", language="Markdown").classes("w-full result-editor")
-            diagram_html = ui.html("", sanitize=False).classes("w-full")
-            warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
-
             with ui.tab_panels(result_tabs, value=generated_tab).classes("w-full"):
                 with ui.tab_panel(generated_tab):
-                    generated
+                    generated = ui.codemirror("", language="Python").classes("w-full result-editor")
                 with ui.tab_panel(diff_tab):
-                    diff
+                    diff = ui.codemirror("", language="Markdown").classes("w-full result-editor")
                 with ui.tab_panel(text_diagram_tab):
-                    text_diagram
+                    text_diagram = ui.codemirror("", language="Markdown").classes("w-full result-editor")
                 with ui.tab_panel(graph_tab):
-                    diagram_html
+                    diagram_html = ui.html("", sanitize=False).classes("w-full")
                 with ui.tab_panel(warnings_tab):
-                    warnings
+                    warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
 
     def resolve_current_dag_path() -> Path:
         active_tab = source_tabs.value
