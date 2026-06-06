@@ -146,7 +146,7 @@ def create_ui():
             height: 96px;
             padding: 0;
             border-radius: 0 8px 8px 0;
-            background: #2563eb !important;
+            background: var(--q-primary) !important;
             color: white !important;
             border: 1px solid rgba(255, 255, 255, 0.35);
             border-left: 0;
@@ -160,7 +160,8 @@ def create_ui():
             left: 0;
           }
           .source-drawer-toggle-btn:hover {
-            background: #1d4ed8 !important;
+            background: var(--q-primary) !important;
+            filter: brightness(0.92);
             box-shadow: 0 12px 26px rgba(15, 23, 42, 0.34);
           }
           .source-drawer-toggle-btn .q-icon {

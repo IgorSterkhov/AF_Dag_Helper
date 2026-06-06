@@ -184,7 +184,7 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(handles[0].get("props", {}).get("icon"), "chevron_right")
         self.assertIn("top: 50%", response.text)
         self.assertIn("transform: translateY(-50%)", response.text)
-        self.assertIn("background: #2563eb", response.text)
+        self.assertIn("background: var(--q-primary)", response.text)
         self.assertIn("clip-path: polygon", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
