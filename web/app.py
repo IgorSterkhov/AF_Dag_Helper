@@ -139,17 +139,29 @@ def create_ui():
           .source-drawer-toggle-btn {
             position: fixed;
             left: 360px;
-            top: 96px;
-            width: 24px;
-            min-width: 24px;
-            height: 80px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 32px;
+            min-width: 32px;
+            height: 96px;
             padding: 0;
             border-radius: 0 8px 8px 0;
+            background: #2563eb !important;
+            color: white !important;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-left: 0;
+            box-shadow: 0 10px 22px rgba(15, 23, 42, 0.28);
+            clip-path: polygon(0 0, 100% 14%, 100% 86%, 0 100%);
+            cursor: pointer;
             z-index: 3001;
             transition: left 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
           }
           .source-drawer-toggle-btn.drawer-closed {
             left: 0;
+          }
+          .source-drawer-toggle-btn:hover {
+            background: #1d4ed8 !important;
+            box-shadow: 0 12px 26px rgba(15, 23, 42, 0.34);
           }
           .source-drawer-toggle-btn .q-icon {
             transition: transform 180ms ease;
@@ -520,21 +532,25 @@ def create_ui():
             **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
             для `inlets` и `outlets`.
 
-            **Workflow:** выберите исходник во вкладках Source: Repo, Upload или Paste. Во вкладке Repo сначала
-            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в таблице с поиском. При
-            необходимости включите Force all tasks для пересчета всех задач и Compare existing OMEntity для
-            сравнения с уже прописанными сущностями. Затем нажмите Analyze.
+            **Workflow:** откройте выезжающее Source drawer кнопкой меню в header или боковой кнопкой
+            `source drawer toggle handle`. В drawer выберите источник: Repo, Upload или Paste. Для Repo сначала
+            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в компактной
+            таблице с раскрываемыми папками, поиском и колонками последнего коммита. После выбора исходный код
+            появится в блоке DAG Source. При необходимости включите Force all tasks для пересчета всех задач и
+            Compare existing OMEntity для сравнения с уже прописанными сущностями. Затем нажмите Analyze; после
+            запуска Analyze drawer закрывается автоматически.
 
             **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save. Difference показывает
             отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage. Interactive Diagram
             показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется на связях задач.
             Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
 
-            **Элементы интерфейса:** кнопка меню в header и боковая стрелка открывают Source drawer с выбором
-            источника и параметрами анализа. После запуска Analyze drawer закрывается. Левая часть рабочей области
-            показывает исходный код DAG, правая часть отвечает за просмотр результата. Кнопка Settings в header
-            открывает управление репозиториями: add/remove и git pull. Переключатель DAG view / Task view находится
-            на вкладке Interactive Diagram и меняет вид текущей диаграммы без повторного запуска Analyze.
+            **Элементы интерфейса:** кнопка с тремя полосками в header и трапециевидный source drawer toggle handle
+            управляют Source drawer; стрелка показывает, в какую сторону откроется или закроется меню. Левая часть
+            рабочей области - DAG Source с readonly-просмотром кода выбранного DAG, правая часть - результаты анализа.
+            Кнопка Settings в header открывает управление репозиториями: add/remove и git pull. Переключатель DAG view
+            / Task view находится на вкладке Interactive Diagram и меняет вид текущей диаграммы без повторного запуска
+            Analyze.
             """
         )
         with ui.row().classes("w-full justify-end"):
@@ -673,9 +689,9 @@ def create_ui():
         ui.button(icon="settings", on_click=settings_dialog.open).props("flat round dense text-color=white").tooltip("Settings")
         ui.space()
 
-    source_drawer_toggle_btn = ui.button(icon="chevron_right", on_click=toggle_source_drawer).props("flat dense").classes(
-        "source-drawer-toggle-btn drawer-closed"
-    )
+    source_drawer_toggle_btn = ui.button(icon="chevron_right", on_click=toggle_source_drawer).props(
+        "flat dense text-color=white"
+    ).classes("source-drawer-toggle-btn source-drawer-toggle-handle drawer-closed").tooltip("Source drawer toggle handle")
     source_drawer.on_value_change(sync_source_drawer_toggle)
 
     with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):

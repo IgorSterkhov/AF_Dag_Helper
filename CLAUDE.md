@@ -8,6 +8,8 @@ Treat `CLAUDE.md` as the persistent project system prompt and the source of repo
 
 Work pragmatically: inspect the current structure and git status before edits, preserve user changes, keep commits scoped, and verify with the project commands before reporting completion.
 
+When web UI/UX changes are made, update the in-app help text in the same change and include help relevance in the final self-review before reporting completion.
+
 ## Project Overview
 
 AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating OMEntity (inlets/outlets) for OpenMetadata lineage tracking. It parses Python DAG files, extracts SQL queries, analyzes table references, and generates ready-to-use OMEntity code.

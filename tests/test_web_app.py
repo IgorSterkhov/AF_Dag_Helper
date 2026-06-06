@@ -66,6 +66,16 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("Справка по AF DAGs Helper", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_help_dialog_describes_drawer_workflow(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+
+        self.assertIn("source drawer toggle handle", response.text)
+        self.assertIn("DAG Source", response.text)
+        self.assertIn("Analyze drawer", response.text)
+        self.assertIn("выезжающее Source drawer", response.text)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_header_has_help_button_next_to_title(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))
@@ -169,8 +179,13 @@ class WebAppTest(unittest.TestCase):
         ]
 
         self.assertEqual(len(handles), 1)
+        self.assertIn("source-drawer-toggle-handle", handles[0].get("class", []))
         self.assertIn("drawer-closed", handles[0].get("class", []))
         self.assertEqual(handles[0].get("props", {}).get("icon"), "chevron_right")
+        self.assertIn("top: 50%", response.text)
+        self.assertIn("transform: translateY(-50%)", response.text)
+        self.assertIn("background: #2563eb", response.text)
+        self.assertIn("clip-path: polygon", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_main_layout_contains_source_code_preview(self):
