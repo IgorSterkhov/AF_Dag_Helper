@@ -106,6 +106,95 @@ class WebAppTest(unittest.TestCase):
         )
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_header_has_source_drawer_menu_button(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        headers = [element for element in elements.values() if element["tag"] == "nicegui-header"]
+        self.assertEqual(len(headers), 1)
+        header_descendants = list(_descendants(elements, headers[0]))
+
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("icon") == "menu"
+                and element.get("props", {}).get("text-color") == "white"
+                for element in header_descendants
+            )
+        )
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_source_controls_live_in_overlay_drawer(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        drawers = [
+            element for element in elements.values()
+            if "source-drawer" in element.get("class", [])
+        ]
+        self.assertEqual(len(drawers), 1)
+        self.assertEqual(drawers[0].get("props", {}).get("model-value"), False)
+        self.assertIn("overlay", drawers[0].get("props", {}))
+        drawer_descendants = list(_descendants(elements, drawers[0]))
+
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("label") == "Analyze"
+                for element in drawer_descendants
+            )
+        )
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("label") == "Browse DAG..."
+                for element in drawer_descendants
+            )
+        )
+        self.assertFalse(
+            any("source-pane" in element.get("class", []) for element in elements.values())
+        )
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_floating_drawer_handle_is_closed_by_default(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        handles = [
+            element for element in elements.values()
+            if "source-drawer-toggle-btn" in element.get("class", [])
+        ]
+
+        self.assertEqual(len(handles), 1)
+        self.assertIn("drawer-closed", handles[0].get("class", []))
+        self.assertEqual(handles[0].get("props", {}).get("icon"), "chevron_right")
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_main_layout_contains_source_code_preview(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        source_previews = [
+            element for element in elements.values()
+            if "source-code-pane" in element.get("class", [])
+        ]
+        self.assertEqual(len(source_previews), 1)
+        preview_descendants = list(_descendants(elements, source_previews[0]))
+
+        self.assertTrue(any(element.get("text") == "DAG Source" for element in preview_descendants))
+        self.assertTrue(
+            any(
+                element["tag"] == "nicegui-codemirror"
+                and "readonly" in element.get("props", {})
+                for element in preview_descendants
+            )
+        )
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_source_tabs_use_repo_tab(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))

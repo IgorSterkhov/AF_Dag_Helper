@@ -133,9 +133,42 @@ def create_ui():
             min-height: 0;
             overflow: hidden;
           }
-          .source-pane {
+          .source-drawer {
+            width: 360px;
+          }
+          .source-drawer-toggle-btn {
+            position: fixed;
+            left: 360px;
+            top: 96px;
+            width: 24px;
+            min-width: 24px;
+            height: 80px;
+            padding: 0;
+            border-radius: 0 8px 8px 0;
+            z-index: 3001;
+            transition: left 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+          }
+          .source-drawer-toggle-btn.drawer-closed {
+            left: 0;
+          }
+          .source-drawer-toggle-btn .q-icon {
+            transition: transform 180ms ease;
+          }
+          .source-code-pane {
             height: 100%;
             min-height: 0;
+            overflow: hidden;
+          }
+          .source-code-editor {
+            flex: 1 1 auto;
+            height: auto;
+            min-height: 0;
+          }
+          .source-code-editor .cm-editor {
+            height: 100%;
+            min-height: 0;
+          }
+          .source-code-editor .cm-scroller {
             overflow: auto;
           }
           .result-pane {
@@ -338,6 +371,7 @@ def create_ui():
         state.selected_repo = repo_select.value
         state.selected_dag_node = selected["node_id"]
         selected_dag_label.set_text(f"Selected DAG: {selected['path']}")
+        preview_source_path(repository_browser.resolve_dag_path(repo_select.value, selected["node_id"]))
         dag_picker_dialog.close()
 
     def picker_event_row(event) -> Dict:
@@ -444,6 +478,41 @@ def create_ui():
         except Exception as exc:
             ui.notify(f"Git pull all failed: {exc}", type="negative", close_button=True)
 
+    def set_source_preview(title: str, source: str):
+        source_preview_label.set_text(title)
+        source_preview.set_value(source)
+
+    def preview_source_path(path: Path):
+        try:
+            set_source_preview(path.name, path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            set_source_preview(path.name, f"# Failed to load source preview: {exc}")
+
+    def preview_paste_source(_event=None):
+        source = paste_area.value or ""
+        title = "Pasted DAG source" if source else "Select a DAG to preview source"
+        set_source_preview(title, source)
+
+    def set_drawer_toggle_class(class_name: str, enabled: bool):
+        if enabled and class_name not in source_drawer_toggle_btn.classes:
+            source_drawer_toggle_btn.classes.append(class_name)
+        if not enabled and class_name in source_drawer_toggle_btn.classes:
+            source_drawer_toggle_btn.classes.remove(class_name)
+
+    def sync_source_drawer_toggle(_event=None):
+        opened = bool(source_drawer.value)
+        set_drawer_toggle_class("drawer-closed", not opened)
+        source_drawer_toggle_btn.props["icon"] = "chevron_left" if opened else "chevron_right"
+        source_drawer_toggle_btn.update()
+
+    def toggle_source_drawer():
+        source_drawer.set_value(not bool(source_drawer.value))
+        sync_source_drawer_toggle()
+
+    def close_source_drawer():
+        source_drawer.set_value(False)
+        sync_source_drawer_toggle()
+
     with ui.dialog() as help_dialog, ui.card().classes("max-w-[720px]"):
         ui.label("Справка по AF DAGs Helper").classes("text-h6")
         ui.markdown(
@@ -461,10 +530,11 @@ def create_ui():
             показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется на связях задач.
             Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
 
-            **Элементы интерфейса:** левая панель отвечает за выбор источника и параметры анализа. Кнопка Settings
-            в header открывает управление репозиториями: add/remove и git pull. Правая панель отвечает за просмотр
-            результата. Переключатель DAG view / Task view находится на вкладке Interactive Diagram и меняет вид
-            текущей диаграммы без повторного запуска Analyze.
+            **Элементы интерфейса:** кнопка меню в header и боковая стрелка открывают Source drawer с выбором
+            источника и параметрами анализа. После запуска Analyze drawer закрывается. Левая часть рабочей области
+            показывает исходный код DAG, правая часть отвечает за просмотр результата. Кнопка Settings в header
+            открывает управление репозиториями: add/remove и git pull. Переключатель DAG view / Task view находится
+            на вкладке Interactive Diagram и меняет вид текущей диаграммы без повторного запуска Analyze.
             """
         )
         with ui.row().classes("w-full justify-end"):
@@ -558,48 +628,63 @@ def create_ui():
             picker_select_btn.disable()
             ui.button("Cancel", on_click=dag_picker_dialog.close)
 
+    with ui.left_drawer(value=False, elevated=True).props("overlay width=360").classes("source-drawer") as source_drawer:
+        ui.label("Source").classes("text-h6")
+        with ui.tabs().classes("w-full") as source_tabs:
+            repo_tab = ui.tab("repo", label="Repo")
+            upload_tab = ui.tab("upload", label="Upload")
+            paste_tab = ui.tab("paste", label="Paste")
+
+        def on_upload(event):
+            content = event.content.read()
+            state.uploaded_source = content.decode("utf-8")
+            state.uploaded_name = Path(event.name).stem
+            upload_label.set_text(f"Uploaded: {event.name}")
+            set_source_preview(event.name, state.uploaded_source)
+
+        with ui.tab_panels(source_tabs, value=repo_tab).classes("w-full"):
+            with ui.tab_panel(repo_tab):
+                ui.label("Choose a DAG from registered repositories.")
+                repo_select = ui.select([], label="Repository", on_change=on_repo_change).classes("w-full")
+                selected_dag_label = ui.label("No DAG selected")
+                with ui.row().classes("w-full"):
+                    ui.button("Browse DAG...", icon="folder_open", on_click=open_dag_picker)
+                    ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
+                    ui.button("Git pull", icon="download", on_click=pull_current_repository)
+            with ui.tab_panel(upload_tab):
+                ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
+                upload_label = ui.label("No file uploaded")
+            with ui.tab_panel(paste_tab):
+                paste_area = ui.textarea(
+                    label="Paste DAG source",
+                    on_change=preview_paste_source,
+                ).classes("w-full").props("rows=12")
+
+        force = ui.checkbox("Force all tasks", value=True)
+        compare = ui.checkbox("Compare existing OMEntity", value=True)
+
+        with ui.row().classes("w-full"):
+            analyze_btn = ui.button("Analyze", icon="play_arrow").classes("grow")
+
     with ui.header().classes("items-center"):
+        ui.button(icon="menu", on_click=toggle_source_drawer).props("flat round dense text-color=white").tooltip("Source menu")
         ui.label("AF DAGs Helper").classes("text-h6")
         ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
         ui.button(icon="settings", on_click=settings_dialog.open).props("flat round dense text-color=white").tooltip("Settings")
         ui.space()
 
+    source_drawer_toggle_btn = ui.button(icon="chevron_right", on_click=toggle_source_drawer).props("flat dense").classes(
+        "source-drawer-toggle-btn drawer-closed"
+    )
+    source_drawer.on_value_change(sync_source_drawer_toggle)
+
     with ui.row().classes("web-main w-full no-wrap items-stretch q-pa-md gap-4 overflow-hidden"):
-        with ui.card().classes("source-pane w-1/3 min-w-[360px]"):
-            ui.label("Source").classes("text-h6")
-            with ui.tabs().classes("w-full") as source_tabs:
-                repo_tab = ui.tab("repo", label="Repo")
-                upload_tab = ui.tab("upload", label="Upload")
-                paste_tab = ui.tab("paste", label="Paste")
+        with ui.card().classes("source-code-pane w-2/5 min-w-[420px] min-h-0"):
+            ui.label("DAG Source").classes("text-h6")
+            source_preview_label = ui.label("Select a DAG to preview source").classes("text-caption text-grey-7")
+            source_preview = ui.codemirror("", language="Python").props("readonly").classes("w-full source-code-editor")
 
-            def on_upload(event):
-                content = event.content.read()
-                state.uploaded_source = content.decode("utf-8")
-                state.uploaded_name = Path(event.name).stem
-                upload_label.set_text(f"Uploaded: {event.name}")
-
-            with ui.tab_panels(source_tabs, value=repo_tab).classes("w-full"):
-                with ui.tab_panel(repo_tab):
-                    ui.label("Choose a DAG from registered repositories.")
-                    repo_select = ui.select([], label="Repository", on_change=on_repo_change).classes("w-full")
-                    selected_dag_label = ui.label("No DAG selected")
-                    with ui.row().classes("w-full"):
-                        ui.button("Browse DAG...", icon="folder_open", on_click=open_dag_picker)
-                        ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
-                        ui.button("Git pull", icon="download", on_click=pull_current_repository)
-                with ui.tab_panel(upload_tab):
-                    ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
-                    upload_label = ui.label("No file uploaded")
-                with ui.tab_panel(paste_tab):
-                    paste_area = ui.textarea(label="Paste DAG source").classes("w-full").props("rows=12")
-
-            force = ui.checkbox("Force all tasks", value=True)
-            compare = ui.checkbox("Compare existing OMEntity", value=True)
-
-            with ui.row().classes("w-full"):
-                analyze_btn = ui.button("Analyze", icon="play_arrow").classes("grow")
-
-        with ui.column().classes("result-pane w-2/3 min-h-0 overflow-hidden"):
+        with ui.column().classes("result-pane w-3/5 min-h-0 overflow-hidden"):
             summary = ui.markdown("Select a source and run analysis.")
             with ui.tabs().classes("w-full") as result_tabs:
                 generated_tab = ui.tab("Generated OMEntity")
@@ -663,6 +748,7 @@ def create_ui():
     def analyze():
         try:
             dag_path = resolve_current_dag_path()
+            close_source_drawer()
             result = service.analyze(DAGAnalysisRequest(
                 dag_path=dag_path,
                 force_all_tasks=force.value,
