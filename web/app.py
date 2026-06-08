@@ -5,11 +5,12 @@ import html as html_lib
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response
 from nicegui import ui
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 from visualizer.cytoscape_viewer import CytoscapeViewer  # noqa: E402
 from web.analysis_service import DAGAnalysisRequest, DAGAnalysisService  # noqa: E402
 from web.auth import BasicAuthMiddleware  # noqa: E402
+from web.feedback_store import AnalysisFeedbackContext, FeedbackStore  # noqa: E402
 from web.repository_browser import RepositoryBrowser  # noqa: E402
 
 
@@ -31,6 +33,55 @@ def health():
     return {"status": "ok", "service": "af-dags-helper"}
 
 
+def feedback_store_from_env() -> FeedbackStore:
+    root = Path(os.environ.get("AF_DAGS_HELPER_FEEDBACK_DIR", ROOT_DIR / ".runtime" / "feedback"))
+    return FeedbackStore(root)
+
+
+def _feedback_records_payload(
+    feedback_type: str,
+    mode: str,
+    mark_exported: bool,
+) -> Dict[str, List[Dict]]:
+    try:
+        store = feedback_store_from_env()
+        records = store.list_feedback(feedback_type, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = {"items": records}
+    if mark_exported:
+        store.mark_exported(record["id"] for record in records)
+    return payload
+
+
+@app.get("/api/feedback/dag-issues")
+def list_dag_issue_feedback(mode: str = "all", mark_exported: bool = False):
+    return _feedback_records_payload("analysis_issue", mode, mark_exported)
+
+
+@app.get("/api/feedback/dag-issues/archive")
+def download_dag_issue_feedback_archive(mode: str = "all", mark_exported: bool = False):
+    try:
+        store = feedback_store_from_env()
+        records = store.list_feedback("analysis_issue", mode=mode)
+        archive_bytes = store.build_dag_issue_archive(records)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if mark_exported:
+        store.mark_exported(record["id"] for record in records)
+    return Response(
+        content=archive_bytes,
+        media_type="application/gzip",
+        headers={"Content-Disposition": "attachment; filename=dag-issues-feedback.tar.gz"},
+    )
+
+
+@app.get("/api/feedback/global")
+def list_global_feedback(mode: str = "all", mark_exported: bool = False):
+    return _feedback_records_payload("global", mode, mark_exported)
+
+
 class WebState:
     """Small in-memory UI state for one NiceGUI process."""
 
@@ -38,6 +89,7 @@ class WebState:
         self.active_source_tab = "repo"
         self.uploaded_source: Optional[str] = None
         self.uploaded_name = "uploaded_dag"
+        self.uploaded_original_filename = "uploaded_dag.py"
         self.generated_text = ""
         self.graph_data = {}
         self.dag_id = ""
@@ -48,6 +100,7 @@ class WebState:
         self.picker_expanded_dirs: Set[str] = set()
         self.picker_search = ""
         self.picker_selected_node: Optional[str] = None
+        self.last_analysis_context: Optional[AnalysisFeedbackContext] = None
 
 
 def _source_tab_name(active_tab, repo_tab, upload_tab, paste_tab) -> str:
@@ -93,6 +146,30 @@ def _resolve_current_source_path(
 async def _read_upload_event_source(event) -> tuple[str, str]:
     uploaded_file = event.file
     return Path(uploaded_file.name).stem, await uploaded_file.text(encoding="utf-8")
+
+
+def _safe_python_basename(name: str) -> str:
+    basename = Path(name or "").name
+    if basename.endswith(".py"):
+        basename = basename[:-3]
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in basename)
+    safe = safe.strip("_")
+    return f"{safe or 'pasted_dag'}.py"
+
+
+def _feedback_source_filename(
+    source_type: str,
+    dag_id: str,
+    original_filename: Optional[str],
+    requested_filename: Optional[str],
+) -> str:
+    if requested_filename:
+        return _safe_python_basename(requested_filename)
+    if source_type == "upload" and original_filename:
+        return _safe_python_basename(original_filename)
+    if dag_id and dag_id != "Unknown":
+        return _safe_python_basename(dag_id)
+    return "pasted_dag.py"
 
 
 def _ancestor_dir_ids(path: str, node_type: str) -> List[str]:
@@ -324,7 +401,15 @@ def create_ui():
         registered = set(registered_repo_names())
         return [name for name in repository_browser.discover_repositories() if name not in registered]
 
+    def clear_analysis_context():
+        state.last_analysis_context = None
+        try:
+            report_issue_btn.disable()
+        except NameError:
+            pass
+
     def clear_selected_dag():
+        clear_analysis_context()
         state.selected_dag_node = None
         state.picker_dir = ""
         state.picker_nodes = []
@@ -417,6 +502,7 @@ def create_ui():
         if not selected or selected.get("type") != "file":
             ui.notify("Select a .py DAG first", type="warning")
             return
+        clear_analysis_context()
         state.selected_repo = repo_select.value
         state.selected_dag_node = selected["node_id"]
         selected_dag_label.set_text(f"Selected DAG: {selected['path']}")
@@ -539,6 +625,7 @@ def create_ui():
             set_source_preview(path.name, f"# Failed to load source preview: {exc}")
 
     def preview_paste_source(_event=None):
+        clear_analysis_context()
         state.active_source_tab = "paste"
         source = paste_area.value or ""
         title = "Pasted DAG source" if source else "Select a DAG to preview source"
@@ -579,10 +666,15 @@ def create_ui():
             Compare existing OMEntity для сравнения с уже прописанными сущностями. Затем нажмите Analyze; после
             запуска Analyze drawer закрывается автоматически.
 
-            **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save. Difference показывает
-            отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage. Interactive Diagram
-            показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется на связях задач.
-            Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
+            **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save/Report issue.
+            Difference показывает отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage.
+            Interactive Diagram показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется
+            на связях задач. Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
+
+            **Обратная связь:** кнопка с иконкой сообщения в header открывает форму общих пожеланий по сервису.
+            На вкладке Generated OMEntity кнопка Report issue сохраняет замечание по текущему анализу, снимок DAG,
+            сгенерированный OMEntity, Difference, предупреждения и метаданные анализа. Для DAG из
+            репозитория также сохраняются имя repo, путь к файлу и commit, который был выбран при анализе.
 
             **Элементы интерфейса:** кнопка с тремя полосками в header и трапециевидный source drawer toggle handle
             управляют Source drawer; стрелка показывает, в какую сторону откроется или закроется меню. Левая часть
@@ -616,6 +708,97 @@ def create_ui():
         settings_status = ui.markdown("").classes("w-full")
         with ui.row().classes("w-full justify-end"):
             ui.button("Close", on_click=settings_dialog.close)
+
+    def submit_global_feedback():
+        message = global_feedback_text.value or ""
+        try:
+            feedback_store_from_env().create_global_feedback(message)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+            return
+        except Exception as exc:
+            ui.notify(f"Failed to save feedback: {exc}", type="negative", close_button=True)
+            return
+        global_feedback_text.set_value("")
+        global_feedback_dialog.close()
+        ui.notify("Feedback saved", type="positive")
+
+    def analysis_issue_needs_filename(context: Optional[AnalysisFeedbackContext]) -> bool:
+        return bool(
+            context
+            and context.source_type == "paste"
+            and not context.source_filename
+            and (not context.dag_id or context.dag_id == "Unknown")
+        )
+
+    def open_analysis_issue_dialog():
+        context = state.last_analysis_context
+        if not context:
+            ui.notify("Run Analyze before reporting an issue", type="warning")
+            return
+        issue_feedback_text.set_value("")
+        issue_filename_input.set_value("")
+        issue_filename_input.set_visibility(analysis_issue_needs_filename(context))
+        analysis_issue_dialog.open()
+
+    def submit_analysis_issue_feedback():
+        context = state.last_analysis_context
+        if not context:
+            ui.notify("Run Analyze before reporting an issue", type="warning")
+            return
+        message = issue_feedback_text.value or ""
+        source_filename = context.source_filename
+        if analysis_issue_needs_filename(context):
+            requested_filename = issue_filename_input.value or ""
+            if not requested_filename.strip():
+                ui.notify("DAG filename is required for pasted source without dag_id", type="warning")
+                return
+            source_filename = _feedback_source_filename(
+                context.source_type,
+                context.dag_id,
+                context.original_filename,
+                requested_filename,
+            )
+        try:
+            feedback_store_from_env().create_analysis_issue_feedback(
+                message,
+                replace(context, source_filename=source_filename),
+            )
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+            return
+        except Exception as exc:
+            ui.notify(f"Failed to save issue feedback: {exc}", type="negative", close_button=True)
+            return
+        issue_feedback_text.set_value("")
+        issue_filename_input.set_value("")
+        analysis_issue_dialog.close()
+        ui.notify("Issue feedback saved", type="positive")
+
+    with ui.dialog() as global_feedback_dialog, ui.card().classes("max-w-[640px] w-full"):
+        ui.label("Обратная связь").classes("text-h6")
+        global_feedback_text = ui.textarea(
+            label="Feedback",
+            placeholder="Идеи, пожелания или замечания по сервису",
+        ).classes("w-full").props("rows=7")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Send", icon="send", on_click=submit_global_feedback)
+            ui.button("Cancel", on_click=global_feedback_dialog.close)
+
+    with ui.dialog() as analysis_issue_dialog, ui.card().classes("max-w-[680px] w-full"):
+        ui.label("Report analysis issue").classes("text-h6")
+        ui.markdown("Опишите, что автоматический анализ распознал неверно.")
+        issue_feedback_text = ui.textarea(
+            label="What was recognized incorrectly?",
+        ).classes("w-full").props("rows=7")
+        issue_filename_input = ui.input(
+            label="DAG filename",
+            placeholder="daily_sales.py",
+        ).classes("w-full")
+        issue_filename_input.set_visibility(False)
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Send issue", icon="send", on_click=submit_analysis_issue_feedback)
+            ui.button("Cancel", on_click=analysis_issue_dialog.close)
 
     dag_picker_columns = [
         {"name": "name", "label": "Name", "field": "name", "align": "left", "sortable": True},
@@ -687,6 +870,8 @@ def create_ui():
         ui.label("Source").classes("text-h6")
         def on_source_tab_change(event):
             if isinstance(event.value, str) and event.value in {"repo", "upload", "paste"}:
+                if state.active_source_tab != event.value:
+                    clear_analysis_context()
                 state.active_source_tab = event.value
 
         with ui.tabs(value=state.active_source_tab, on_change=on_source_tab_change).classes("w-full") as source_tabs:
@@ -695,8 +880,10 @@ def create_ui():
             paste_tab = ui.tab("paste", label="Paste")
 
         async def on_upload(event):
+            clear_analysis_context()
             state.active_source_tab = "upload"
             state.uploaded_name, state.uploaded_source = await _read_upload_event_source(event)
+            state.uploaded_original_filename = event.file.name
             upload_label.set_text(f"Uploaded: {event.file.name}")
             set_source_preview(event.file.name, state.uploaded_source)
 
@@ -728,6 +915,7 @@ def create_ui():
         ui.button(icon="menu", on_click=toggle_source_drawer).props("flat round dense text-color=white").tooltip("Source menu")
         ui.label("AF DAGs Helper").classes("text-h6")
         ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
+        ui.button(icon="rate_review", on_click=global_feedback_dialog.open).props("flat round dense text-color=white").tooltip("Обратная связь")
         ui.button(icon="settings", on_click=settings_dialog.open).props("flat round dense text-color=white").tooltip("Settings")
         ui.space()
 
@@ -756,6 +944,8 @@ def create_ui():
                     with ui.row().classes("generated-actions w-full justify-end"):
                         copy_btn = ui.button("Copy", icon="content_copy")
                         download_btn = ui.button("Save", icon="download")
+                        report_issue_btn = ui.button("Report issue", icon="report_problem", on_click=open_analysis_issue_dialog)
+                        report_issue_btn.disable()
                     generated = ui.codemirror("", language="Python").classes("w-full result-editor")
                 with ui.tab_panel(diff_tab).classes("result-tab-panel"):
                     diff = ui.codemirror("", language="Markdown").classes("w-full result-editor")
@@ -775,8 +965,11 @@ def create_ui():
                 with ui.tab_panel(warnings_tab).classes("result-tab-panel"):
                     warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
 
+    def current_source_type() -> str:
+        return state.active_source_tab or _source_tab_name(source_tabs.value, repo_tab, upload_tab, paste_tab)
+
     def resolve_current_dag_path() -> Path:
-        active_tab = state.active_source_tab or _source_tab_name(source_tabs.value, repo_tab, upload_tab, paste_tab)
+        active_tab = current_source_type()
         return _resolve_current_source_path(
             active_tab=active_tab,
             repo_name=repo_select.value,
@@ -800,7 +993,14 @@ def create_ui():
 
     def analyze():
         try:
+            clear_analysis_context()
+            active_tab = current_source_type()
             dag_path = resolve_current_dag_path()
+            source_text = dag_path.read_text(encoding="utf-8")
+            repo_name = repo_select.value if active_tab == "repo" else None
+            repo_path = state.selected_dag_node.removeprefix("file:") if active_tab == "repo" and state.selected_dag_node else None
+            repo_commit = repository_browser.repo_head_revision(repo_name) if repo_name else None
+            original_filename = state.uploaded_original_filename if active_tab == "upload" else None
             close_source_drawer()
             result = service.analyze(DAGAnalysisRequest(
                 dag_path=dag_path,
@@ -820,7 +1020,39 @@ def create_ui():
             state.graph_data = result.graph_data
             state.dag_id = result.dag_id
             render_diagram()
-            warnings.set_value("\n".join(result.warnings) if result.warnings else "No warnings")
+            warnings_text = "\n".join(result.warnings) if result.warnings else "No warnings"
+            warnings.set_value(warnings_text)
+            source_filename = None
+            if active_tab == "repo" and repo_path:
+                source_filename = Path(repo_path).name
+            elif active_tab == "upload":
+                source_filename = _feedback_source_filename(active_tab, result.dag_id, original_filename, None)
+            elif active_tab == "paste" and result.dag_id and result.dag_id != "Unknown":
+                source_filename = _feedback_source_filename(active_tab, result.dag_id, None, None)
+            state.last_analysis_context = AnalysisFeedbackContext(
+                source_type=active_tab,
+                dag_id=result.dag_id,
+                repo_name=repo_name,
+                dag_path=repo_path,
+                repo_commit=repo_commit,
+                original_filename=original_filename,
+                source_text=source_text,
+                analysis_options={
+                    "force_all_tasks": bool(force.value),
+                    "compare_existing": bool(compare.value),
+                    "initial_view": diagram_view.value,
+                },
+                analysis_summary={
+                    "task_count": result.task_count,
+                    "output_count": result.output_count,
+                    "warnings_count": len(result.warnings),
+                },
+                generated_text=result.generated_text,
+                difference_text=result.difference_text,
+                warnings_text=warnings_text,
+                source_filename=source_filename,
+            )
+            report_issue_btn.enable()
             ui.notify("Analysis complete", type="positive")
         except Exception as exc:
             ui.notify(f"Analysis failed: {exc}", type="negative", close_button=True)

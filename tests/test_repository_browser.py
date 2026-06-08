@@ -268,6 +268,20 @@ class RepositoryBrowserTest(unittest.TestCase):
             )
             self.assertEqual(output, "Already up to date.")
 
+    def test_repo_head_revision_returns_registered_repository_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo_a"
+            (repo / ".git").mkdir(parents=True)
+            browser = RepositoryBrowser(root, root / "registry.json")
+            browser.add_repository("repo_a")
+
+            with patch.object(browser, "_repo_revision", return_value="abc123") as repo_revision:
+                revision = browser.repo_head_revision("repo_a")
+
+            repo_revision.assert_called_once_with(repo.resolve())
+            self.assertEqual(revision, "abc123")
+
 
 if __name__ == "__main__":
     unittest.main()

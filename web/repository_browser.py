@@ -183,6 +183,9 @@ class RepositoryBrowser:
     def pull_all(self) -> Dict[str, str]:
         return {name: self.pull_repository(name) for name in self.registered_repositories()}
 
+    def repo_head_revision(self, name: str) -> str:
+        return self._repo_revision(self._registered_repo_path(name))
+
     def _repo_path(self, name: str) -> Path:
         candidate = (self.repos_root / name).resolve()
         if candidate.parent != self.repos_root:

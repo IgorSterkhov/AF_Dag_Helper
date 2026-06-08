@@ -1,7 +1,9 @@
 import asyncio
+import io
 import json
 import os
 import re
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from web.app import app
+from web.feedback_store import AnalysisFeedbackContext, FeedbackStore
 
 
 def _nicegui_elements(html: str):
@@ -25,6 +28,22 @@ def _descendants(elements, element):
         child = elements[str(child_id)]
         yield child
         yield from _descendants(elements, child)
+
+
+def _sample_feedback_context() -> AnalysisFeedbackContext:
+    return AnalysisFeedbackContext(
+        source_type="repo",
+        dag_id="daily_sales",
+        repo_name="analytics",
+        dag_path="dags/daily_sales.py",
+        repo_commit="abc123",
+        original_filename=None,
+        source_text="from airflow import DAG\n",
+        analysis_options={"force_all_tasks": True, "compare_existing": True, "initial_view": "dag"},
+        analysis_summary={"task_count": 2, "output_count": 1, "warnings_count": 0},
+        generated_text="inlets=[]\noutlets=[]\n",
+        difference_text="# MATCH\n",
+    )
 
 
 class WebAppTest(unittest.TestCase):
@@ -60,6 +79,43 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(second_response.status_code, 200)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_feedback_api_routes_require_authentication(self):
+        client = TestClient(app)
+
+        self.assertEqual(client.get("/api/feedback/dag-issues").status_code, 401)
+        self.assertEqual(client.get("/api/feedback/global").status_code, 401)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_feedback_api_routes_separate_global_and_dag_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FeedbackStore(Path(tmp))
+            store.create_global_feedback("General note")
+            store.create_analysis_issue_feedback("Wrong DAG result", _sample_feedback_context())
+            with patch.dict("os.environ", {"AF_DAGS_HELPER_FEEDBACK_DIR": tmp}):
+                client = TestClient(app)
+                global_response = client.get("/api/feedback/global", auth=("admin", "secret"))
+                issue_response = client.get("/api/feedback/dag-issues", auth=("admin", "secret"))
+
+        self.assertEqual(global_response.status_code, 200)
+        self.assertEqual(issue_response.status_code, 200)
+        self.assertEqual([item["type"] for item in global_response.json()["items"]], ["global"])
+        self.assertEqual([item["type"] for item in issue_response.json()["items"]], ["analysis_issue"])
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_dag_issue_archive_route_returns_tar_gz(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FeedbackStore(Path(tmp))
+            store.create_analysis_issue_feedback("Wrong DAG result", _sample_feedback_context())
+            with patch.dict("os.environ", {"AF_DAGS_HELPER_FEEDBACK_DIR": tmp}):
+                client = TestClient(app)
+                response = client.get("/api/feedback/dag-issues/archive", auth=("admin", "secret"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/gzip")
+        with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as archive:
+            self.assertIn("feedback.json", archive.getnames())
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_root_page_contains_help_dialog_content(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))
@@ -75,6 +131,15 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("DAG Source", response.text)
         self.assertIn("Analyze drawer", response.text)
         self.assertIn("выезжающее Source drawer", response.text)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_help_dialog_describes_feedback_workflow(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+
+        self.assertIn("Обратная связь", response.text)
+        self.assertIn("Report issue", response.text)
+        self.assertIn("снимок DAG", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_header_has_help_button_next_to_title(self):
@@ -111,6 +176,25 @@ class WebAppTest(unittest.TestCase):
             any(
                 element["tag"] == "q-btn"
                 and element.get("props", {}).get("icon") == "settings"
+                and element.get("props", {}).get("text-color") == "white"
+                for element in header_descendants
+            )
+        )
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_header_has_feedback_button(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        headers = [element for element in elements.values() if element["tag"] == "nicegui-header"]
+        self.assertEqual(len(headers), 1)
+        header_descendants = list(_descendants(elements, headers[0]))
+
+        self.assertTrue(
+            any(
+                element["tag"] == "q-btn"
+                and element.get("props", {}).get("icon") == "rate_review"
                 and element.get("props", {}).get("text-color") == "white"
                 for element in header_descendants
             )
@@ -274,6 +358,17 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(resolver("paste", repo_tab, upload_tab, paste_tab), "paste")
         self.assertEqual(resolver(SimpleNamespace(props={"name": "repo"}), repo_tab, upload_tab, paste_tab), "repo")
         self.assertEqual(resolver(SimpleNamespace(_props={"name": "paste"}), repo_tab, upload_tab, paste_tab), "paste")
+
+    def test_safe_feedback_source_filename_uses_dag_id_for_paste(self):
+        import web.app as web_app
+
+        self.assertEqual(web_app._feedback_source_filename("paste", "sales_daily", None, None), "sales_daily.py")
+
+    def test_safe_python_basename_rejects_path_components(self):
+        import web.app as web_app
+
+        self.assertEqual(web_app._safe_python_basename("../bad/name"), "name.py")
+        self.assertEqual(web_app._safe_python_basename("daily sales.py"), "daily_sales.py")
 
     def test_resolve_current_source_path_writes_uploaded_source(self):
         import web.app as web_app
@@ -597,6 +692,29 @@ class WebAppTest(unittest.TestCase):
 
         self.assertIn("Copy", labels)
         self.assertIn("Save", labels)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_generated_tab_owns_report_issue_action_after_copy_and_save(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        generated_panels = [
+            element for element in elements.values()
+            if element["tag"] == "q-tab-panel"
+            and element.get("props", {}).get("name") == "Generated OMEntity"
+        ]
+        self.assertEqual(len(generated_panels), 1)
+        button_labels = [
+            element.get("props", {}).get("label")
+            for element in _descendants(elements, generated_panels[0])
+            if element["tag"] == "q-btn"
+        ]
+
+        self.assertEqual(
+            [label for label in button_labels if label in {"Copy", "Save", "Report issue"}],
+            ["Copy", "Save", "Report issue"],
+        )
 
 
 if __name__ == "__main__":
