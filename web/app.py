@@ -35,6 +35,7 @@ class WebState:
     """Small in-memory UI state for one NiceGUI process."""
 
     def __init__(self):
+        self.active_source_tab = "repo"
         self.uploaded_source: Optional[str] = None
         self.uploaded_name = "uploaded_dag"
         self.generated_text = ""
@@ -59,6 +60,34 @@ def _source_tab_name(active_tab, repo_tab, upload_tab, paste_tab) -> str:
     if isinstance(props, dict) and props.get("name") in {"repo", "upload", "paste"}:
         return str(props["name"])
     return ""
+
+
+def _resolve_current_source_path(
+    *,
+    active_tab: str,
+    repo_name: Optional[str],
+    selected_dag_node: Optional[str],
+    uploaded_source: Optional[str],
+    uploaded_name: str,
+    pasted_source: str,
+    repository_browser: RepositoryBrowser,
+    service: DAGAnalysisService,
+) -> Path:
+    if active_tab == "repo":
+        if not repo_name:
+            raise ValueError("No repository selected")
+        if not selected_dag_node:
+            raise ValueError("No DAG selected")
+        return repository_browser.resolve_dag_path(repo_name, selected_dag_node)
+    if active_tab == "upload":
+        if not uploaded_source:
+            raise ValueError("Upload a .py DAG first")
+        return service.write_source_to_runtime_file(uploaded_name, uploaded_source)
+    if active_tab == "paste":
+        if not pasted_source:
+            raise ValueError("Paste DAG source first")
+        return service.write_source_to_runtime_file("pasted_dag", pasted_source)
+    raise ValueError("Select a source tab")
 
 
 def _ancestor_dir_ids(path: str, node_type: str) -> List[str]:
@@ -300,6 +329,7 @@ def create_ui():
         selected_dag_label.set_text("No DAG selected")
 
     def refresh_selected_repo():
+        state.active_source_tab = "repo"
         selected_repo = repo_select.value
         state.selected_repo = selected_repo
         clear_selected_dag()
@@ -316,6 +346,7 @@ def create_ui():
         refresh_selected_repo()
 
     def on_repo_change(_event=None):
+        state.active_source_tab = "repo"
         refresh_selected_repo()
 
     def load_dag_picker_index(refresh: bool = False):
@@ -417,6 +448,7 @@ def create_ui():
             ui.notify(f"Failed to refresh DAG list: {exc}", type="negative", close_button=True)
 
     def open_dag_picker():
+        state.active_source_tab = "repo"
         if not repo_select.value:
             ui.notify("Select a repository first", type="warning")
             return
@@ -502,6 +534,7 @@ def create_ui():
             set_source_preview(path.name, f"# Failed to load source preview: {exc}")
 
     def preview_paste_source(_event=None):
+        state.active_source_tab = "paste"
         source = paste_area.value or ""
         title = "Pasted DAG source" if source else "Select a DAG to preview source"
         set_source_preview(title, source)
@@ -647,20 +680,25 @@ def create_ui():
 
     with ui.left_drawer(value=False, elevated=True).props("overlay width=360").classes("source-drawer") as source_drawer:
         ui.label("Source").classes("text-h6")
-        with ui.tabs().classes("w-full") as source_tabs:
+        def on_source_tab_change(event):
+            if isinstance(event.value, str) and event.value in {"repo", "upload", "paste"}:
+                state.active_source_tab = event.value
+
+        with ui.tabs(value=state.active_source_tab, on_change=on_source_tab_change).classes("w-full") as source_tabs:
             repo_tab = ui.tab("repo", label="Repo")
             upload_tab = ui.tab("upload", label="Upload")
             paste_tab = ui.tab("paste", label="Paste")
 
         def on_upload(event):
+            state.active_source_tab = "upload"
             content = event.content.read()
             state.uploaded_source = content.decode("utf-8")
             state.uploaded_name = Path(event.name).stem
             upload_label.set_text(f"Uploaded: {event.name}")
             set_source_preview(event.name, state.uploaded_source)
 
-        with ui.tab_panels(source_tabs, value=repo_tab).classes("w-full"):
-            with ui.tab_panel(repo_tab):
+        with ui.tab_panels(source_tabs, value=state.active_source_tab).classes("w-full"):
+            with ui.tab_panel("repo"):
                 ui.label("Choose a DAG from registered repositories.")
                 repo_select = ui.select([], label="Repository", on_change=on_repo_change).classes("w-full")
                 selected_dag_label = ui.label("No DAG selected")
@@ -668,10 +706,10 @@ def create_ui():
                     ui.button("Browse DAG...", icon="folder_open", on_click=open_dag_picker)
                     ui.button("Refresh", icon="refresh", on_click=lambda: refresh_repo_controls())
                     ui.button("Git pull", icon="download", on_click=pull_current_repository)
-            with ui.tab_panel(upload_tab):
+            with ui.tab_panel("upload"):
                 ui.upload(on_upload=on_upload, auto_upload=True).props("accept=.py").classes("w-full")
                 upload_label = ui.label("No file uploaded")
-            with ui.tab_panel(paste_tab):
+            with ui.tab_panel("paste"):
                 paste_area = ui.textarea(
                     label="Paste DAG source",
                     on_change=preview_paste_source,
@@ -735,22 +773,17 @@ def create_ui():
                     warnings = ui.codemirror("", language="Markdown").classes("w-full result-editor")
 
     def resolve_current_dag_path() -> Path:
-        active_tab = _source_tab_name(source_tabs.value, repo_tab, upload_tab, paste_tab)
-        if active_tab == "repo":
-            if not repo_select.value:
-                raise ValueError("No repository selected")
-            if not state.selected_dag_node:
-                raise ValueError("No DAG selected")
-            return repository_browser.resolve_dag_path(repo_select.value, state.selected_dag_node)
-        if active_tab == "upload":
-            if not state.uploaded_source:
-                raise ValueError("Upload a .py DAG first")
-            return service.write_source_to_runtime_file(state.uploaded_name, state.uploaded_source)
-        if active_tab == "paste" and not paste_area.value:
-            raise ValueError("Paste DAG source first")
-        if active_tab == "paste":
-            return service.write_source_to_runtime_file("pasted_dag", paste_area.value)
-        raise ValueError("Select a source tab")
+        active_tab = state.active_source_tab or _source_tab_name(source_tabs.value, repo_tab, upload_tab, paste_tab)
+        return _resolve_current_source_path(
+            active_tab=active_tab,
+            repo_name=repo_select.value,
+            selected_dag_node=state.selected_dag_node,
+            uploaded_source=state.uploaded_source,
+            uploaded_name=state.uploaded_name,
+            pasted_source=paste_area.value or "",
+            repository_browser=repository_browser,
+            service=service,
+        )
 
     def render_diagram():
         if not state.graph_data:

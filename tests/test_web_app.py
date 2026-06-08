@@ -223,7 +223,37 @@ class WebAppTest(unittest.TestCase):
 
         self.assertNotIn("Server file", response.text)
         self.assertIn("Repo", tabs)
+        self.assertIn("Upload", tabs)
+        self.assertIn("Paste", tabs)
         self.assertNotIn("Server file", tabs)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_upload_and_paste_source_tab_panels_have_inputs(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        upload_panels = [
+            element for element in elements.values()
+            if element["tag"] == "q-tab-panel"
+            and element.get("props", {}).get("name") == "upload"
+        ]
+        paste_panels = [
+            element for element in elements.values()
+            if element["tag"] == "q-tab-panel"
+            and element.get("props", {}).get("name") == "paste"
+        ]
+
+        self.assertEqual(len(upload_panels), 1)
+        self.assertEqual(len(paste_panels), 1)
+        self.assertTrue(any(element["tag"] == "nicegui-upload" for element in _descendants(elements, upload_panels[0])))
+        self.assertTrue(
+            any(
+                element["tag"] == "nicegui-input"
+                and element.get("props", {}).get("label") == "Paste DAG source"
+                for element in _descendants(elements, paste_panels[0])
+            )
+        )
 
     def test_source_tab_name_accepts_tab_object_and_string_values(self):
         import web.app as web_app
@@ -242,6 +272,61 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(resolver("upload", repo_tab, upload_tab, paste_tab), "upload")
         self.assertEqual(resolver("paste", repo_tab, upload_tab, paste_tab), "paste")
         self.assertEqual(resolver(SimpleNamespace(props={"name": "repo"}), repo_tab, upload_tab, paste_tab), "repo")
+        self.assertEqual(resolver(SimpleNamespace(_props={"name": "paste"}), repo_tab, upload_tab, paste_tab), "paste")
+
+    def test_resolve_current_source_path_writes_uploaded_source(self):
+        import web.app as web_app
+
+        class FakeService:
+            def __init__(self):
+                self.calls = []
+
+            def write_source_to_runtime_file(self, name, source):
+                self.calls.append((name, source))
+                return Path("/tmp/uploaded.py")
+
+        service = FakeService()
+
+        path = web_app._resolve_current_source_path(
+            active_tab="upload",
+            repo_name=None,
+            selected_dag_node=None,
+            uploaded_source="from airflow import DAG\n",
+            uploaded_name="daily_dag",
+            pasted_source="",
+            repository_browser=None,
+            service=service,
+        )
+
+        self.assertEqual(path, Path("/tmp/uploaded.py"))
+        self.assertEqual(service.calls, [("daily_dag", "from airflow import DAG\n")])
+
+    def test_resolve_current_source_path_writes_pasted_source(self):
+        import web.app as web_app
+
+        class FakeService:
+            def __init__(self):
+                self.calls = []
+
+            def write_source_to_runtime_file(self, name, source):
+                self.calls.append((name, source))
+                return Path("/tmp/pasted.py")
+
+        service = FakeService()
+
+        path = web_app._resolve_current_source_path(
+            active_tab="paste",
+            repo_name=None,
+            selected_dag_node=None,
+            uploaded_source=None,
+            uploaded_name="uploaded_dag",
+            pasted_source="print('dag')\n",
+            repository_browser=None,
+            service=service,
+        )
+
+        self.assertEqual(path, Path("/tmp/pasted.py"))
+        self.assertEqual(service.calls, [("pasted_dag", "print('dag')\n")])
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_repo_tab_contains_repository_select_and_browse_button(self):
