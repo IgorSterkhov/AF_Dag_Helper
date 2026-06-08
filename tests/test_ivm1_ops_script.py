@@ -17,7 +17,7 @@ class Ivm1OpsScriptTest(unittest.TestCase):
             check=True,
         )
 
-        for action in ("deploy", "status", "health", "logs", "follow", "restart", "version", "credentials", "ssh"):
+        for action in ("deploy", "status", "health", "logs", "follow", "restart", "version", "credentials", "ssh", "feedback-fetch"):
             self.assertIn(action, result.stdout)
 
     def test_help_describes_interactive_and_direct_usage(self):
@@ -31,6 +31,8 @@ class Ivm1OpsScriptTest(unittest.TestCase):
 
         self.assertIn("Interactive", result.stdout)
         self.assertIn("Direct commands", result.stdout)
+        self.assertIn("feedback-fetch", result.stdout)
+        self.assertIn("Fetch new DAG issue feedback", result.stdout)
 
     def test_script_has_valid_bash_syntax(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], cwd=ROOT, check=True)

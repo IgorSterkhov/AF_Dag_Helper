@@ -12,8 +12,8 @@ LOG_LINES="${AF_DAGS_HELPER_LOG_LINES:-200}"
 FOLLOW_LINES="${AF_DAGS_HELPER_FOLLOW_LINES:-100}"
 DEPLOY_SCRIPT="${AF_DAGS_HELPER_DEPLOY_SCRIPT:-$SCRIPT_DIR/deploy_ivm1.sh}"
 
-DIRECT_ACTIONS=(deploy status health logs follow restart version credentials ssh)
-MENU_ACTIONS=(deploy status health follow logs restart version credentials ssh exit)
+DIRECT_ACTIONS=(deploy status health logs follow restart version credentials ssh feedback-fetch)
+MENU_ACTIONS=(deploy status health follow logs restart version credentials ssh feedback-fetch exit)
 MENU_LABELS=(
   "Deploy changes"
   "Service status"
@@ -24,6 +24,7 @@ MENU_LABELS=(
   "Version info"
   "Show web credentials"
   "Open SSH shell"
+  "Fetch new DAG issue feedback"
   "Exit"
 )
 
@@ -44,6 +45,8 @@ Direct commands:
   scripts/ivm1_ops.sh version      Show local and deployed git revisions
   scripts/ivm1_ops.sh credentials  Show deployed web UI credentials
   scripts/ivm1_ops.sh ssh          Open SSH shell on the VM
+  scripts/ivm1_ops.sh feedback-fetch
+                                   Fetch new DAG issue feedback into .runtime/feedback_inbox
 
 Options:
   --list                           Print direct command names
@@ -152,6 +155,14 @@ open_shell() {
   ssh "$HOST"
 }
 
+feedback_fetch() {
+  "$REPO_ROOT/scripts/feedback_triage.py" fetch \
+    --host "$HOST" \
+    --app-dir "$APP_DIR" \
+    --port "$PORT" \
+    --mode new
+}
+
 run_action() {
   case "$1" in
     deploy) run_deploy ;;
@@ -163,6 +174,7 @@ run_action() {
     version) version_info ;;
     credentials) show_credentials ;;
     ssh) open_shell ;;
+    feedback-fetch) feedback_fetch ;;
     *)
       echo "Unknown action: $1" >&2
       echo "Run scripts/ivm1_ops.sh --help" >&2
@@ -268,7 +280,7 @@ main() {
     --list)
       list_actions
       ;;
-    deploy|status|health|logs|follow|restart|version|credentials|ssh)
+    deploy|status|health|logs|follow|restart|version|credentials|ssh|feedback-fetch)
       run_action "$1"
       ;;
     *)

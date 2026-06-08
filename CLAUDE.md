@@ -49,6 +49,11 @@ scripts/ivm1_ops.sh status
 scripts/ivm1_ops.sh follow
 scripts/ivm1_ops.sh version
 scripts/ivm1_ops.sh deploy
+scripts/ivm1_ops.sh feedback-fetch
+
+# Local feedback triage
+scripts/feedback_triage.py fetch --mode new
+scripts/feedback_triage.py analyze .runtime/feedback_inbox/<run-dir>
 
 # Show deployed web UI credentials
 ssh ivm-1 'cat /home/igor.sterhov/dev/af_dags_helper/.runtime/auth.env'
@@ -86,6 +91,7 @@ FastAPI + NiceGUI web UI
 - `DAGAnalysisService` ([web/analysis_service.py](web/analysis_service.py)) - shared analysis workflow for web UI
 - `web.app` ([web/app.py](web/app.py)) - FastAPI + NiceGUI application and `/health`
 - `BasicAuthMiddleware` ([web/auth.py](web/auth.py)) - Basic Auth gate for web UI HTTP/WebSocket routes; `/health` is public
+- `scripts/feedback_triage.py` ([scripts/feedback_triage.py](scripts/feedback_triage.py)) - local-only feedback fetch/analyze workflow for DAG issue reports
 
 ## OMEntity Format
 
@@ -202,6 +208,29 @@ python test_against_samples.py "Dags samples/api_ch3_hr_erp_updates.py"
 - Несовпадение серверов - нужен маппинг в `server_mapping.yaml`
 - Задача уже имеет OMEntity - утилита пропускает такие задачи
 - SQL синтаксис не поддерживается sqlglot (ALTER, OPTIMIZE и т.д.)
+
+## Feedback Triage Workflow
+
+When the user asks to analyze new feedback / замечания from the web UI, do the work directly:
+
+1. Fetch new DAG issue feedback from the deployed service:
+   ```bash
+   scripts/feedback_triage.py fetch --mode new
+   ```
+2. If direct `ssh ivm-1` fails from WSL/Codex, retry with the tsh fallback:
+   ```bash
+   AF_DAGS_HELPER_SSH_COMMAND="/mnt/c/Windows/System32/tsh17.exe ssh" \
+   AF_DAGS_HELPER_DEPLOY_HOST="igor.sterhov@ivm-1.ivms.vm.dm.v2.wb-cloud.ru" \
+   scripts/feedback_triage.py fetch --mode new
+   ```
+3. Analyze the printed run directory:
+   ```bash
+   scripts/feedback_triage.py analyze .runtime/feedback_inbox/<run-dir>
+   ```
+4. Read `.runtime/feedback_inbox/<run-dir>/review.md`, inspect attachments when needed, and summarize the likely root cause in chat.
+5. Propose analyzer/service code changes to the user before editing analyzer logic.
+
+Default fetch behavior must stay conservative: do not pass `--mark-exported` unless the user explicitly asks or the archive was already saved/analyzed and marking is intentionally part of the task. Feedback inbox data lives under `.runtime/feedback_inbox/`, which is local runtime state and must not be committed or deployed.
 
 ## Dependencies
 
