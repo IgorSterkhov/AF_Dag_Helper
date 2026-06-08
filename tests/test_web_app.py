@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -327,6 +328,23 @@ class WebAppTest(unittest.TestCase):
 
         self.assertEqual(path, Path("/tmp/pasted.py"))
         self.assertEqual(service.calls, [("pasted_dag", "print('dag')\n")])
+
+    def test_read_upload_event_source_uses_nicegui_file_api(self):
+        import web.app as web_app
+
+        class FakeUploadFile:
+            name = "daily_sales.py"
+
+            async def text(self, encoding="utf-8"):
+                self.encoding = encoding
+                return "from airflow import DAG\n"
+
+        filename, source = asyncio.run(
+            web_app._read_upload_event_source(SimpleNamespace(file=FakeUploadFile()))
+        )
+
+        self.assertEqual(filename, "daily_sales")
+        self.assertEqual(source, "from airflow import DAG\n")
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_repo_tab_contains_repository_select_and_browse_button(self):

@@ -10,6 +10,8 @@ Work pragmatically: inspect the current structure and git status before edits, p
 
 When web UI/UX changes are made, update the in-app help text in the same change and include help relevance in the final self-review before reporting completion.
 
+Before deploying to `ivm-1`, run local verification first. For web UI changes this means the relevant unit tests, Python syntax checks, and a local smoke check when the change affects runtime behavior. Deploy only after local checks pass.
+
 ## Project Overview
 
 AF DAGs Helper is a utility for analyzing Airflow DAG files and auto-generating OMEntity (inlets/outlets) for OpenMetadata lineage tracking. It parses Python DAG files, extracts SQL queries, analyzes table references, and generates ready-to-use OMEntity code.

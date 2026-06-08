@@ -90,6 +90,11 @@ def _resolve_current_source_path(
     raise ValueError("Select a source tab")
 
 
+async def _read_upload_event_source(event) -> tuple[str, str]:
+    uploaded_file = event.file
+    return Path(uploaded_file.name).stem, await uploaded_file.text(encoding="utf-8")
+
+
 def _ancestor_dir_ids(path: str, node_type: str) -> List[str]:
     parts = [part for part in path.split("/") if part]
     directory_parts = parts[:-1] if node_type == "file" else parts[:-1]
@@ -689,13 +694,11 @@ def create_ui():
             upload_tab = ui.tab("upload", label="Upload")
             paste_tab = ui.tab("paste", label="Paste")
 
-        def on_upload(event):
+        async def on_upload(event):
             state.active_source_tab = "upload"
-            content = event.content.read()
-            state.uploaded_source = content.decode("utf-8")
-            state.uploaded_name = Path(event.name).stem
-            upload_label.set_text(f"Uploaded: {event.name}")
-            set_source_preview(event.name, state.uploaded_source)
+            state.uploaded_name, state.uploaded_source = await _read_upload_event_source(event)
+            upload_label.set_text(f"Uploaded: {event.file.name}")
+            set_source_preview(event.file.name, state.uploaded_source)
 
         with ui.tab_panels(source_tabs, value=state.active_source_tab).classes("w-full"):
             with ui.tab_panel("repo"):
