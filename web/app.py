@@ -653,40 +653,70 @@ def create_ui():
         source_drawer.set_value(False)
         sync_source_drawer_toggle()
 
-    with ui.dialog() as help_dialog, ui.card().classes("max-w-[720px]"):
+    help_text = """
+    **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
+    для `inlets` и `outlets`.
+
+    **Workflow:** откройте выезжающее Source drawer кнопкой меню в header или боковой кнопкой
+    `source drawer toggle handle`. В drawer выберите источник: Repo, Upload или Paste. Для Repo сначала
+    выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в компактной
+    таблице с раскрываемыми папками, поиском и колонками последнего коммита. После выбора исходный код
+    появится в блоке DAG Source. При необходимости включите Force all tasks для пересчета всех задач и
+    Compare existing OMEntity для сравнения с уже прописанными сущностями. Затем нажмите Analyze; после
+    запуска Analyze drawer закрывается автоматически.
+
+    **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save/Report issue.
+    Copy копирует текущий сгенерированный OMEntity в буфер обмена, Save скачивает его в файл.
+    Difference показывает отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage.
+    Interactive Diagram показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется
+    на связях задач. Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
+
+    **Обратная связь:** кнопка с иконкой сообщения в header открывает форму общих пожеланий по сервису.
+    На вкладке Generated OMEntity кнопка Report issue сохраняет замечание по текущему анализу, снимок DAG,
+    сгенерированный OMEntity, Difference, предупреждения и метаданные анализа. Для DAG из
+    репозитория также сохраняются имя repo, путь к файлу и commit, который был выбран при анализе.
+
+    **Элементы интерфейса:** кнопка с тремя полосками в header и трапециевидный source drawer toggle handle
+    управляют Source drawer; стрелка показывает, в какую сторону откроется или закроется меню. Левая часть
+    рабочей области - DAG Source с readonly-просмотром кода выбранного DAG, правая часть - результаты анализа.
+    Кнопка Settings в header открывает управление репозиториями: add/remove и git pull. Переключатель DAG view
+    / Task view находится на вкладке Interactive Diagram и меняет вид текущей диаграммы без повторного запуска
+    Analyze.
+    """
+    releases_text = """
+    **Что нового**
+
+    **Точнее генерация OMEntity.** Сервис лучше понимает helper-функции, переносы данных между ClickHouse,
+    `dictGet*`-словари и перенос партиций `ALTER TABLE ... ATTACH PARTITION`. Для таблиц с `_d` суффикс
+    теперь сохраняется, если он нужен в OpenMetadata.
+
+    **Копирование работает из браузера.** Кнопка Copy на вкладке Generated OMEntity копирует результат
+    прямо в буфер обмена пользователя.
+
+    **Замечания можно отправлять из интерфейса.** В header есть общая обратная связь, а в Generated OMEntity
+    можно отправить замечание к конкретному анализу. К сообщению сохраняются DAG, сгенерированный результат,
+    Difference и технический контекст.
+
+    **Удобнее работать с DAG из репозиториев.** В Repo можно выбрать зарегистрированный репозиторий, открыть
+    дерево папок, найти DAG поиском и увидеть автора, дату и комментарий последнего коммита по файлу.
+
+    **Интерфейс стал рабочей областью анализа.** Source drawer прячется слева, код DAG виден рядом с результатами,
+    а диаграммы переключаются между DAG view и Task view без повторного анализа.
+
+    **Upload и Paste стабилизированы.** Анализ одинаково работает для DAG из репозитория, загруженного файла
+    и вставленного текста.
+    """
+
+    with ui.dialog() as help_dialog, ui.card().classes("max-w-[760px] w-full"):
         ui.label("Справка по AF DAGs Helper").classes("text-h6")
-        ui.markdown(
-            """
-            **Что делает сервис:** анализирует Python DAG Airflow, находит SQL/API lineage и генерирует `OMEntity`
-            для `inlets` и `outlets`.
-
-            **Workflow:** откройте выезжающее Source drawer кнопкой меню в header или боковой кнопкой
-            `source drawer toggle handle`. В drawer выберите источник: Repo, Upload или Paste. Для Repo сначала
-            выберите зарегистрированный репозиторий, затем нажмите Browse DAG и выберите `.py` DAG в компактной
-            таблице с раскрываемыми папками, поиском и колонками последнего коммита. После выбора исходный код
-            появится в блоке DAG Source. При необходимости включите Force all tasks для пересчета всех задач и
-            Compare existing OMEntity для сравнения с уже прописанными сущностями. Затем нажмите Analyze; после
-            запуска Analyze drawer закрывается автоматически.
-
-            **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save/Report issue.
-            Copy копирует текущий сгенерированный OMEntity в буфер обмена, Save скачивает его в файл.
-            Difference показывает отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage.
-            Interactive Diagram показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется
-            на связях задач. Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
-
-            **Обратная связь:** кнопка с иконкой сообщения в header открывает форму общих пожеланий по сервису.
-            На вкладке Generated OMEntity кнопка Report issue сохраняет замечание по текущему анализу, снимок DAG,
-            сгенерированный OMEntity, Difference, предупреждения и метаданные анализа. Для DAG из
-            репозитория также сохраняются имя repo, путь к файлу и commit, который был выбран при анализе.
-
-            **Элементы интерфейса:** кнопка с тремя полосками в header и трапециевидный source drawer toggle handle
-            управляют Source drawer; стрелка показывает, в какую сторону откроется или закроется меню. Левая часть
-            рабочей области - DAG Source с readonly-просмотром кода выбранного DAG, правая часть - результаты анализа.
-            Кнопка Settings в header открывает управление репозиториями: add/remove и git pull. Переключатель DAG view
-            / Task view находится на вкладке Interactive Diagram и меняет вид текущей диаграммы без повторного запуска
-            Analyze.
-            """
-        )
+        with ui.tabs().classes("w-full") as help_tabs:
+            help_tab = ui.tab("Справка")
+            releases_tab = ui.tab("Релизы")
+        with ui.tab_panels(help_tabs, value=help_tab).classes("w-full"):
+            with ui.tab_panel(help_tab):
+                ui.markdown(help_text)
+            with ui.tab_panel(releases_tab):
+                ui.markdown(releases_text)
         with ui.row().classes("w-full justify-end"):
             ui.button("Закрыть", on_click=help_dialog.close)
 
@@ -917,7 +947,7 @@ def create_ui():
     with ui.header().classes("items-center"):
         ui.button(icon="menu", on_click=toggle_source_drawer).props("flat round dense text-color=white").tooltip("Source menu")
         ui.label("AF DAGs Helper").classes("text-h6")
-        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка")
+        ui.button(icon="help_outline", on_click=help_dialog.open).props("flat round dense text-color=white").tooltip("Справка и релизы")
         ui.button(icon="rate_review", on_click=global_feedback_dialog.open).props("flat round dense text-color=white").tooltip("Обратная связь")
         ui.button(icon="settings", on_click=settings_dialog.open).props("flat round dense text-color=white").tooltip("Settings")
         ui.space()

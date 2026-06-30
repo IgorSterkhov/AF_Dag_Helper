@@ -142,6 +142,18 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("снимок DAG", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_help_dialog_contains_help_and_release_tabs(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+        elements = _nicegui_elements(response.text)
+
+        self.assertIn("Справка по AF DAGs Helper", response.text)
+        self.assertIn("Что нового", response.text)
+        self.assertIn("Релизы", response.text)
+        self.assertTrue(any(element["tag"] == "q-tabs" for element in elements.values()))
+        self.assertTrue(any(element["tag"] == "q-tab-panels" for element in elements.values()))
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_header_has_help_button_next_to_title(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))
@@ -161,6 +173,7 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(help_button["tag"], "q-btn")
         self.assertEqual(help_button.get("props", {}).get("icon"), "help_outline")
         self.assertEqual(help_button.get("props", {}).get("text-color"), "white")
+        self.assertIn("Справка и релизы", response.text)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_header_has_settings_button(self):
