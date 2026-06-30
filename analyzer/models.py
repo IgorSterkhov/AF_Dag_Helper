@@ -79,6 +79,17 @@ class CrossServerCall:
 
 
 @dataclass
+class BulkDumpTransfer:
+    """Передача данных из cursor.execute(SQL) в hook.bulk_dump(table=...)."""
+    sql_var: str = ""                          # SQL variable name for SELECT
+    source_connection: str = ""                # Connection для cursor.execute
+    source_hook: str = ""                      # Hook/cursor name для отложенного remap
+    dst_table: str = ""                        # Destination table for bulk_dump
+    dst_connection: str = ""                   # Connection для bulk_dump hook
+    dst_hook: str = ""                         # Hook name для отложенного remap
+
+
+@dataclass
 class FunctionInfo:
     """Информация о Python функции в DAG."""
     name: str
@@ -91,10 +102,16 @@ class FunctionInfo:
     hook_to_connection: Dict[str, str] = field(default_factory=dict)
     # Maps SQL var name → conn variable name (via hook analysis)
     sql_var_connections: Dict[str, str] = field(default_factory=dict)
+    # Maps SQL var name → hook/cursor parameter name (for call-site remapping)
+    sql_var_hooks: Dict[str, str] = field(default_factory=dict)
+    # Multiple bindings for the same SQL var when a helper is called with different hooks.
+    sql_var_connection_bindings: List[Tuple[str, str]] = field(default_factory=list)
+    sql_var_hook_bindings: List[Tuple[str, str]] = field(default_factory=list)
     sql_variables: List[str] = field(default_factory=list)
     api_connections: List[str] = field(default_factory=list)
     bulk_dump_tables: List[tuple] = field(default_factory=list)  # [('value'|'param', table_name), ...]
     cross_server_calls: List[CrossServerCall] = field(default_factory=list)
+    bulk_dump_transfers: List[BulkDumpTransfer] = field(default_factory=list)
     line_number: int = 0
 
 

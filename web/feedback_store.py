@@ -38,7 +38,7 @@ class FeedbackStore:
     VALID_MODES = {"all", "new"}
 
     def __init__(self, root_dir: Path):
-        self.root_dir = Path(root_dir)
+        self.root_dir = Path(root_dir).resolve()
         self.db_path = self.root_dir / "feedback.sqlite3"
         self.attachments_dir = self.root_dir / "attachments"
         self.root_dir.mkdir(parents=True, exist_ok=True)

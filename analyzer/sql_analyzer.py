@@ -269,6 +269,10 @@ class SQLAnalyzer:
         """Парсит Table expression в TableReference."""
         table_name = table.name
         schema_name = table.db if hasattr(table, 'db') and table.db else None
+        catalog_name = table.catalog if hasattr(table, 'catalog') and table.catalog else None
+
+        if schema_name and catalog_name:
+            schema_name = f"{catalog_name}.{schema_name}"
 
         if not table_name:
             return None
@@ -329,7 +333,10 @@ class SQLAnalyzer:
         """Получает полное имя таблицы из выражения."""
         if isinstance(table_expr, exp.Table):
             schema = table_expr.db if hasattr(table_expr, 'db') and table_expr.db else ''
+            catalog = table_expr.catalog if hasattr(table_expr, 'catalog') and table_expr.catalog else ''
             name = table_expr.name
+            if schema and catalog:
+                return f"{catalog}.{schema}.{name}"
             if schema:
                 return f"{schema}.{name}"
             return name

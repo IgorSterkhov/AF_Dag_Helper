@@ -74,8 +74,9 @@ class OMEntityGenerator:
             has_api = (func_info and func_info.api_connections) or task.op_kwargs_api
             has_dst_table = task.op_kwargs_dst_table
             has_bulk_dump = func_info and func_info.bulk_dump_tables
+            has_bulk_dump_transfer = func_info and func_info.bulk_dump_transfers
 
-            if not sql_result and not has_cross_server and not has_api and not has_dst_table and not has_bulk_dump:
+            if not sql_result and not has_cross_server and not has_api and not has_dst_table and not has_bulk_dump and not has_bulk_dump_transfer:
                 continue
 
             output = self._generate_for_task(
@@ -117,6 +118,13 @@ class OMEntityGenerator:
                 func_info, connection_id, dag_result, warnings
             )
 
+        # FLOW(s): cursor.execute(SQL) → hook.bulk_dump(table)
+        bulk_transfer_flows = []
+        if func_info and func_info.bulk_dump_transfers and dag_result:
+            bulk_transfer_flows = self._build_bulk_dump_transfer_flows(
+                func_info, dag_result, warnings
+            )
+
         # FLOW(s): SQL (per-statement)
         sql_flows = self._build_sql_flows(
             connection_id, sql_result, func_info, dag_result, task, warnings
@@ -155,6 +163,7 @@ class OMEntityGenerator:
                 else:
                     sql_primary.append(sf)
 
+        flows.extend(bulk_transfer_flows)
         flows.extend(sql_primary)
         flows.extend(cs_flows)
         flows.extend(sql_other)
@@ -280,19 +289,23 @@ class OMEntityGenerator:
 
         # Пробуем per-statement анализ с per-variable connection
         per_stmt_results = []  # list of (conn_id, stmt_result)
+        transfer_sql_vars = {
+            transfer.sql_var
+            for transfer in getattr(func_info, 'bulk_dump_transfers', [])
+        }
         for sql_var in func_info.sql_variables:
+            if sql_var in transfer_sql_vars:
+                continue
             # Resolve connection per SQL variable (may differ from function-level)
-            var_conn = connection_id  # default
-            if sql_var in func_info.sql_var_connections:
-                conn_var = func_info.sql_var_connections[sql_var]
-                if dag_result and conn_var in dag_result.connection_variables:
-                    var_conn = dag_result.connection_variables[conn_var]
-
+            var_conns = self._resolve_sql_var_connections(
+                sql_var, connection_id, func_info, dag_result
+            )
             sql_code = dag_result.sql_variables.get(sql_var)
             if sql_code:
                 stmt_results = self.sql_analyzer.analyze_per_statement(sql_code)
-                for stmt in stmt_results:
-                    per_stmt_results.append((var_conn, stmt))
+                for var_conn in var_conns:
+                    for stmt in stmt_results:
+                        per_stmt_results.append((var_conn, stmt))
 
         if per_stmt_results and len(per_stmt_results) > 1:
             # Несколько statement'ов — каждый в отдельный flow с правильным connection
@@ -306,7 +319,11 @@ class OMEntityGenerator:
             flow = self._sql_result_to_flow(var_conn, stmt_result, warnings)
             if flow:
                 flows.append(flow)
-        elif sql_result and (sql_result.inlets or sql_result.outlets):
+        elif (
+            sql_result
+            and (sql_result.inlets or sql_result.outlets)
+            and not transfer_sql_vars
+        ):
             # Fallback — один flow с function-level connection
             flow = self._sql_result_to_flow(connection_id, sql_result, warnings)
             if flow:
@@ -384,6 +401,30 @@ class OMEntityGenerator:
 
         return [merged[key] for key in order]
 
+    def _resolve_sql_var_connections(
+        self,
+        sql_var: str,
+        default_connection_id: str,
+        func_info: FunctionInfo,
+        dag_result: DAGParseResult
+    ) -> List[str]:
+        conn_vars = [
+            conn_var
+            for var_name, conn_var in getattr(func_info, 'sql_var_connection_bindings', [])
+            if var_name == sql_var
+        ]
+        if not conn_vars and sql_var in func_info.sql_var_connections:
+            conn_vars = [func_info.sql_var_connections[sql_var]]
+        if not conn_vars:
+            conn_vars = [default_connection_id]
+
+        resolved: List[str] = []
+        for conn_var in conn_vars:
+            conn_id = dag_result.connection_variables.get(conn_var, conn_var)
+            if conn_id not in resolved:
+                resolved.append(conn_id)
+        return resolved
+
     def _sql_result_to_flow(
         self,
         connection_id: str,
@@ -442,6 +483,45 @@ class OMEntityGenerator:
             outlets=outlets,
             source_description='SQL FROM/JOIN → INSERT INTO'
         )
+
+    def _build_bulk_dump_transfer_flows(
+        self,
+        func_info: FunctionInfo,
+        dag_result: DAGParseResult,
+        warnings: List[str]
+    ) -> List[DataFlowGroup]:
+        """Собирает flow для cursor.execute(SQL) → hook.bulk_dump(table)."""
+        flows: List[DataFlowGroup] = []
+
+        for transfer in func_info.bulk_dump_transfers:
+            sql_code = dag_result.sql_variables.get(transfer.sql_var)
+            if not sql_code:
+                continue
+
+            src_conn = self._resolve_connection_value(transfer.source_connection, dag_result)
+            dst_conn = self._resolve_connection_value(transfer.dst_connection, dag_result)
+            if not src_conn or not dst_conn:
+                continue
+
+            dst_item = self._table_name_to_item(dst_conn, transfer.dst_table)
+            if not dst_item:
+                continue
+
+            stmt_results = self.sql_analyzer.analyze_per_statement(sql_code)
+            for stmt_result in stmt_results:
+                flow = self._sql_result_to_flow(src_conn, stmt_result, warnings)
+                if not flow:
+                    flow = DataFlowGroup(
+                        flow_type='bulk_dump',
+                        source_description=f'cursor.execute → bulk_dump {src_conn} → {dst_conn}'
+                    )
+                flow.flow_type = 'bulk_dump'
+                flow.source_description = f'cursor.execute → bulk_dump {src_conn} → {dst_conn}'
+                if dst_item not in flow.outlets:
+                    flow.outlets.append(dst_item)
+                flows.append(flow)
+
+        return flows
 
     def _build_cross_server_flows(
         self,
@@ -559,6 +639,18 @@ class OMEntityGenerator:
                         ))
 
         return flows
+
+    def _resolve_connection_value(self, conn_var: str, dag_result: DAGParseResult) -> str:
+        if conn_var in dag_result.connection_variables:
+            return dag_result.connection_variables[conn_var]
+        return conn_var
+
+    def _table_name_to_item(self, connection_id: str, table_name: str) -> Optional[OMEntityItem]:
+        if not table_name or '.' not in table_name:
+            return None
+        schema, table = table_name.split('.', 1)
+        fqn = self.fqn_builder.build_fqn(connection_id, schema, table)
+        return OMEntityItem(EntityType.TABLE, fqn)
 
     def _resolve_bulk_dump_table(
         self,

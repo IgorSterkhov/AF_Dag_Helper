@@ -5,7 +5,7 @@ import re
 from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 
-from .models import DAGParseResult, TaskInfo, FunctionInfo, CrossServerCall
+from .models import DAGParseResult, TaskInfo, FunctionInfo, CrossServerCall, BulkDumpTransfer
 
 
 class DAGParser:
@@ -54,6 +54,8 @@ class DAGParser:
         # Извлекаем API connections и bulk_dump tables
         self._extract_api_usage(tree)
         self._extract_bulk_dump_tables(tree)
+        self._extract_bulk_dump_transfers(tree)
+        self._propagate_lineage_through_calls(tree)
 
         return self.result
 
@@ -308,6 +310,238 @@ class DAGParser:
                 if alias in param:
                     func_info.hook_to_connection[param] = conn_var
 
+    def _propagate_lineage_through_calls(self, tree: ast.Module):
+        """Пробрасывает lineage из helper-функций в PythonOperator callable."""
+        func_nodes = self._get_function_nodes(tree)
+        changed = True
+        while changed:
+            changed = False
+            for caller_name, caller_node in func_nodes.items():
+                caller_info = self.result.functions.get(caller_name)
+                if not caller_info:
+                    continue
+
+                for call, callee_name in self._iter_known_function_calls(caller_node):
+                    callee_info = self.result.functions.get(callee_name)
+                    callee_node = func_nodes.get(callee_name)
+                    if not callee_info or not callee_node or callee_name == caller_name:
+                        continue
+                    hook_arg_mapping = self._build_hook_arg_mapping(
+                        caller_info, callee_node, call
+                    )
+                    if self._merge_function_lineage(caller_info, callee_info, hook_arg_mapping):
+                        changed = True
+
+    def _build_hook_arg_mapping(
+        self,
+        caller_info: FunctionInfo,
+        callee_node: ast.FunctionDef,
+        call: ast.Call,
+    ) -> Dict[str, Tuple[str, str]]:
+        """Maps callee hook params to caller connections or caller hook params."""
+        mapping: Dict[str, Tuple[str, str]] = {}
+        callee_params = self._get_function_param_names(callee_node)
+
+        for index, arg in enumerate(call.args):
+            if index < len(callee_params):
+                self._map_call_hook_arg(mapping, callee_params[index], arg, caller_info)
+
+        for keyword in call.keywords:
+            if keyword.arg:
+                self._map_call_hook_arg(mapping, keyword.arg, keyword.value, caller_info)
+
+        return mapping
+
+    def _map_call_hook_arg(
+        self,
+        mapping: Dict[str, Tuple[str, str]],
+        callee_param: str,
+        arg: ast.expr,
+        caller_info: FunctionInfo,
+    ) -> None:
+        if not isinstance(arg, ast.Name):
+            return
+        caller_name = arg.id
+        if caller_name in caller_info.hook_to_connection:
+            mapping[callee_param] = ('connection', caller_info.hook_to_connection[caller_name])
+        else:
+            mapping[callee_param] = ('hook', caller_name)
+
+    def _merge_function_lineage(
+        self,
+        target: FunctionInfo,
+        source: FunctionInfo,
+        hook_arg_mapping: Dict[str, Tuple[str, str]],
+    ) -> bool:
+        changed = False
+
+        for sql_var in source.sql_variables:
+            if sql_var not in target.sql_variables:
+                target.sql_variables.append(sql_var)
+                changed = True
+
+            changed = self._merge_sql_var_binding(
+                target, source, sql_var, hook_arg_mapping
+            ) or changed
+
+        for api_conn in source.api_connections:
+            if api_conn not in target.api_connections:
+                target.api_connections.append(api_conn)
+                changed = True
+
+        for table_info in source.bulk_dump_tables:
+            if table_info not in target.bulk_dump_tables:
+                target.bulk_dump_tables.append(table_info)
+                changed = True
+
+        for call in source.cross_server_calls:
+            if call not in target.cross_server_calls:
+                target.cross_server_calls.append(call)
+                changed = True
+
+        for transfer in source.bulk_dump_transfers:
+            remapped_transfer = self._remap_bulk_dump_transfer(transfer, hook_arg_mapping)
+            if remapped_transfer not in target.bulk_dump_transfers:
+                target.bulk_dump_transfers.append(remapped_transfer)
+                changed = True
+
+        return changed
+
+    def _merge_sql_var_binding(
+        self,
+        target: FunctionInfo,
+        source: FunctionInfo,
+        sql_var: str,
+        hook_arg_mapping: Dict[str, Tuple[str, str]],
+    ) -> bool:
+        changed = False
+
+        connection_bindings = [
+            conn_var
+            for var_name, conn_var in source.sql_var_connection_bindings
+            if var_name == sql_var
+        ]
+        if not connection_bindings and sql_var in source.sql_var_connections:
+            connection_bindings = [source.sql_var_connections[sql_var]]
+
+        hook_bindings = [
+            hook_name
+            for var_name, hook_name in source.sql_var_hook_bindings
+            if var_name == sql_var
+        ]
+        if not hook_bindings and sql_var in source.sql_var_hooks:
+            hook_bindings = [source.sql_var_hooks[sql_var]]
+
+        remapped_hook = False
+        for source_hook in hook_bindings:
+            if source_hook in hook_arg_mapping:
+                remapped_hook = True
+                binding_type, binding_value = hook_arg_mapping[source_hook]
+                if binding_type == 'connection':
+                    changed = self._add_sql_var_connection(
+                        target, sql_var, binding_value
+                    ) or changed
+                else:
+                    changed = self._add_sql_var_hook(
+                        target, sql_var, binding_value
+                    ) or changed
+            else:
+                changed = self._add_sql_var_hook(target, sql_var, source_hook) or changed
+
+        if not remapped_hook:
+            for conn_var in connection_bindings:
+                changed = self._add_sql_var_connection(target, sql_var, conn_var) or changed
+
+        return changed
+
+    def _add_sql_var_connection(
+        self,
+        func_info: FunctionInfo,
+        sql_var: str,
+        conn_var: str,
+    ) -> bool:
+        if not conn_var:
+            return False
+        binding = (sql_var, conn_var)
+        changed = False
+        if binding not in func_info.sql_var_connection_bindings:
+            func_info.sql_var_connection_bindings.append(binding)
+            changed = True
+        if sql_var not in func_info.sql_var_connections:
+            func_info.sql_var_connections[sql_var] = conn_var
+        return changed
+
+    def _add_sql_var_hook(
+        self,
+        func_info: FunctionInfo,
+        sql_var: str,
+        hook_name: str,
+    ) -> bool:
+        if not hook_name:
+            return False
+        binding = (sql_var, hook_name)
+        changed = False
+        if binding not in func_info.sql_var_hook_bindings:
+            func_info.sql_var_hook_bindings.append(binding)
+            changed = True
+        if sql_var not in func_info.sql_var_hooks:
+            func_info.sql_var_hooks[sql_var] = hook_name
+        return changed
+
+    def _remap_bulk_dump_transfer(
+        self,
+        transfer: BulkDumpTransfer,
+        hook_arg_mapping: Dict[str, Tuple[str, str]],
+    ) -> BulkDumpTransfer:
+        source_connection, source_hook = self._remap_hook_binding(
+            transfer.source_connection,
+            transfer.source_hook,
+            hook_arg_mapping,
+        )
+        dst_connection, dst_hook = self._remap_hook_binding(
+            transfer.dst_connection,
+            transfer.dst_hook,
+            hook_arg_mapping,
+        )
+        return BulkDumpTransfer(
+            sql_var=transfer.sql_var,
+            source_connection=source_connection,
+            source_hook=source_hook,
+            dst_table=transfer.dst_table,
+            dst_connection=dst_connection,
+            dst_hook=dst_hook,
+        )
+
+    def _remap_hook_binding(
+        self,
+        connection: str,
+        hook: str,
+        hook_arg_mapping: Dict[str, Tuple[str, str]],
+    ) -> Tuple[str, str]:
+        if hook and hook in hook_arg_mapping:
+            binding_type, binding_value = hook_arg_mapping[hook]
+            if binding_type == 'connection':
+                return binding_value, ''
+            return '', binding_value
+        return connection, hook
+
+    def _get_function_nodes(self, tree: ast.Module) -> Dict[str, ast.FunctionDef]:
+        return {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
+
+    def _get_function_param_names(self, func_node: ast.FunctionDef) -> List[str]:
+        return [arg.arg for arg in func_node.args.args]
+
+    def _iter_known_function_calls(self, func_node: ast.FunctionDef):
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Call):
+                call_name = self._get_call_name(node)
+                if call_name in self.result.functions:
+                    yield node, call_name
+
     def _get_call_name(self, call: ast.Call) -> str:
         """Получает имя вызываемой функции."""
         if isinstance(call.func, ast.Name):
@@ -365,7 +599,7 @@ class DAGParser:
                 # Вызовы hook.exec_with_log(SQL_VAR, ...) и подобные
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     method_name = node.func.attr
-                    if method_name in ('exec', 'exec_with_log', 'on_cluster'):
+                    if method_name in ('exec', 'exec_with_log', 'execute', 'get_records', 'on_cluster'):
                         # Get the hook object name (e.g. 'ch6_hook' from ch6_hook.exec_with_log(...))
                         hook_name = None
                         if isinstance(node.func.value, ast.Name):
@@ -373,18 +607,18 @@ class DAGParser:
 
                         # Проверяем аргументы вызова
                         for arg in node.args:
-                            if isinstance(arg, ast.Name) and arg.id in self.result.sql_variables:
-                                used_sql_vars.add(arg.id)
+                            sql_var = self._resolve_sql_arg(arg)
+                            if sql_var and sql_var in self.result.sql_variables:
+                                used_sql_vars.add(sql_var)
+                                if hook_name:
+                                    self._add_sql_var_hook(func_info, sql_var, hook_name)
                                 # Track which hook executes this SQL var
                                 if hook_name and hook_name in func_info.hook_to_connection:
-                                    func_info.sql_var_connections[arg.id] = func_info.hook_to_connection[hook_name]
-                            # Также проверяем ast.Call внутри (например lambda или другая функция)
-                            elif isinstance(arg, ast.Call):
-                                for inner_arg in arg.args:
-                                    if isinstance(inner_arg, ast.Name) and inner_arg.id in self.result.sql_variables:
-                                        used_sql_vars.add(inner_arg.id)
-                                        if hook_name and hook_name in func_info.hook_to_connection:
-                                            func_info.sql_var_connections[inner_arg.id] = func_info.hook_to_connection[hook_name]
+                                    self._add_sql_var_connection(
+                                        func_info,
+                                        sql_var,
+                                        func_info.hook_to_connection[hook_name],
+                                    )
 
             # Исключаем SQL переменные из cross-server вызовов
             used_sql_vars -= cross_server_sql_vars
@@ -466,6 +700,114 @@ class DAGParser:
 
             func_info.bulk_dump_tables = bulk_dump_tables
 
+    def _extract_bulk_dump_transfers(self, tree: ast.Module):
+        """Извлекает паттерн cursor.execute(SQL) -> hook.bulk_dump(table=...)."""
+        func_nodes = self._get_function_nodes(tree)
+
+        for func_name, func_info in self.result.functions.items():
+            func_node = func_nodes.get(func_name)
+            if not func_node:
+                continue
+
+            transfers: List[BulkDumpTransfer] = []
+
+            for for_node in ast.walk(func_node):
+                if not isinstance(for_node, ast.For):
+                    continue
+
+                loop_vars = self._extract_loop_target_names(for_node.target)
+                rows = self._extract_loop_rows(for_node.iter)
+                if not loop_vars or not rows:
+                    continue
+
+                for row in rows:
+                    loop_values = {
+                        name: self._resolve_loop_value(value)
+                        for name, value in zip(loop_vars, row)
+                    }
+
+                    sql_sources: List[Tuple[str, str, str]] = []
+                    bulk_targets: List[Tuple[str, str, str]] = []
+
+                    for node in ast.walk(for_node):
+                        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                            continue
+
+                        method_name = node.func.attr
+                        receiver = node.func.value.id if isinstance(node.func.value, ast.Name) else None
+                        receiver_conn = func_info.hook_to_connection.get(receiver or "", "")
+
+                        if method_name in ("execute", "get_records"):
+                            for arg in node.args:
+                                sql_var = self._resolve_sql_arg(arg)
+                                if sql_var in loop_values:
+                                    sql_var = loop_values[sql_var]
+                                if sql_var and sql_var in self.result.sql_variables:
+                                    sql_sources.append((sql_var, receiver_conn, receiver or ""))
+
+                        elif method_name == "bulk_dump":
+                            for kw in node.keywords:
+                                if kw.arg != "table":
+                                    continue
+                                table_value = self._resolve_value(kw.value)
+                                if table_value in loop_values:
+                                    table_value = loop_values[table_value]
+                                if table_value and table_value in self.result.string_variables:
+                                    table_value = self.result.string_variables[table_value]
+                                if table_value and "." in table_value:
+                                    bulk_targets.append((table_value, receiver_conn, receiver or ""))
+
+                    for sql_var, source_conn, source_hook in sql_sources:
+                        for dst_table, dst_conn, dst_hook in bulk_targets:
+                            transfer = BulkDumpTransfer(
+                                sql_var=sql_var,
+                                source_connection=source_conn,
+                                source_hook=source_hook,
+                                dst_table=dst_table,
+                                dst_connection=dst_conn,
+                                dst_hook=dst_hook,
+                            )
+                            if transfer not in transfers:
+                                transfers.append(transfer)
+
+                            if sql_var not in func_info.sql_variables:
+                                func_info.sql_variables.append(sql_var)
+                            if source_conn:
+                                self._add_sql_var_connection(func_info, sql_var, source_conn)
+                            if source_hook:
+                                self._add_sql_var_hook(func_info, sql_var, source_hook)
+
+            func_info.bulk_dump_transfers = transfers
+
+    def _extract_loop_target_names(self, target: ast.expr) -> List[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names = []
+            for item in target.elts:
+                if isinstance(item, ast.Name):
+                    names.append(item.id)
+            return names
+        return []
+
+    def _extract_loop_rows(self, node: ast.expr) -> List[List[ast.expr]]:
+        if not isinstance(node, (ast.Tuple, ast.List)):
+            return []
+        rows: List[List[ast.expr]] = []
+        for item in node.elts:
+            if isinstance(item, (ast.Tuple, ast.List)):
+                rows.append(list(item.elts))
+        return rows
+
+    def _resolve_loop_value(self, node: ast.expr) -> Optional[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            return self._resolve_sql_arg(node)
+        return None
+
     def _extract_cross_server_calls(self, tree: ast.Module):
         """Извлекает copy_ch_to_ch_pipe вызовы из функций."""
         # Собираем AST ноды функций
@@ -502,15 +844,17 @@ class DAGParser:
 
         for kw in call.keywords:
             if kw.arg == 'take_data':
-                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                sql_var = self._resolve_sql_arg(kw.value)
+                if sql_var:
+                    take_data_var = sql_var
+                elif isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                     take_data_inline = kw.value.value
-                elif isinstance(kw.value, ast.Name):
-                    take_data_var = kw.value.id
             elif kw.arg == 'insert_data':
-                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                sql_var = self._resolve_sql_arg(kw.value)
+                if sql_var:
+                    insert_data_var = sql_var
+                elif isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                     insert_data_inline = kw.value.value
-                elif isinstance(kw.value, ast.Name):
-                    insert_data_var = kw.value.id
             elif kw.arg == 'src_ch':
                 src_ch = self._resolve_value(kw.value)
             elif kw.arg == 'dst_ch':
@@ -528,6 +872,16 @@ class DAGParser:
                 src_connection=src_ch,
                 dst_connection=dst_ch
             )
+        return None
+
+    def _resolve_sql_arg(self, node: ast.expr) -> Optional[str]:
+        """Резолвит SQL-переменную из прямого имени, SQL.format(...) или SQL % dict(...)."""
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            return self._resolve_sql_arg(node.func.value)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            return self._resolve_sql_arg(node.left)
         return None
 
     def _resolve_value(self, node: ast.expr) -> Optional[str]:
