@@ -2,7 +2,6 @@
 
 import argparse
 import html as html_lib
-import json
 import os
 import sys
 from dataclasses import replace
@@ -20,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 from visualizer.cytoscape_viewer import CytoscapeViewer  # noqa: E402
 from web.analysis_service import DAGAnalysisRequest, DAGAnalysisService  # noqa: E402
 from web.auth import BasicAuthMiddleware  # noqa: E402
+from web.clipboard_ui import bind_copy_button, install_clipboard_script, set_clipboard_text  # noqa: E402
 from web.feedback_store import AnalysisFeedbackContext, FeedbackStore  # noqa: E402
 from web.repository_browser import RepositoryBrowser  # noqa: E402
 
@@ -230,6 +230,7 @@ def create_ui():
     ))
     repository_browser = RepositoryBrowser(repos_root, repository_registry)
     state = WebState()
+    generated_clipboard_key = "generated_omentity"
 
     ui.add_head_html(
         """
@@ -393,6 +394,7 @@ def create_ui():
         </style>
         """
     )
+    install_clipboard_script()
 
     def registered_repo_names():
         return repository_browser.registered_repositories()
@@ -667,6 +669,7 @@ def create_ui():
             запуска Analyze drawer закрывается автоматически.
 
             **Результаты:** вкладка Generated OMEntity содержит готовый код и кнопки Copy/Save/Report issue.
+            Copy копирует текущий сгенерированный OMEntity в буфер обмена, Save скачивает его в файл.
             Difference показывает отличие от существующего `OMEntity`. Text Diagram дает текстовую схему lineage.
             Interactive Diagram показывает граф, где DAG view группирует результат по DAG, а Task view фокусируется
             на связях задач. Warnings содержит предупреждения парсера и подсказки по неоднозначным местам.
@@ -1009,6 +1012,7 @@ def create_ui():
                 initial_view=diagram_view.value,
             ))
             state.generated_text = result.generated_text
+            set_clipboard_text(generated_clipboard_key, result.generated_text)
             summary.set_content(
                 f"**DAG:** `{result.dag_id}`  \n"
                 f"**Tasks:** {result.task_count}  \n"
@@ -1057,13 +1061,6 @@ def create_ui():
         except Exception as exc:
             ui.notify(f"Analysis failed: {exc}", type="negative", close_button=True)
 
-    def copy_generated():
-        if not state.generated_text:
-            ui.notify("Nothing to copy", type="warning")
-            return
-        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(state.generated_text)})")
-        ui.notify("Generated OMEntity copied", type="positive")
-
     def download_generated():
         if not state.generated_text:
             ui.notify("Nothing to save", type="warning")
@@ -1071,7 +1068,13 @@ def create_ui():
         ui.download(state.generated_text.encode("utf-8"), filename="omentity_output.txt", media_type="text/plain")
 
     analyze_btn.on_click(analyze)
-    copy_btn.on_click(copy_generated)
+    bind_copy_button(
+        copy_btn,
+        key=generated_clipboard_key,
+        success_message="Generated OMEntity copied",
+        empty_message="Nothing to copy",
+        failure_message="Clipboard copy failed",
+    )
     download_btn.on_click(download_generated)
     refresh_repo_controls()
 

@@ -694,6 +694,15 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("Save", labels)
 
     @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
+    def test_generated_copy_uses_client_side_clipboard_handler(self):
+        client = TestClient(app)
+        response = client.get("/", auth=("admin", "secret"))
+
+        self.assertIn("afDagsHelperClipboard", response.text)
+        self.assertIn("navigator.clipboard.writeText", response.text)
+        self.assertIn("document.execCommand('copy')", response.text)
+
+    @patch.dict("os.environ", {"AF_DAGS_HELPER_AUTH_USER": "admin", "AF_DAGS_HELPER_AUTH_PASSWORD": "secret"})
     def test_generated_tab_owns_report_issue_action_after_copy_and_save(self):
         client = TestClient(app)
         response = client.get("/", auth=("admin", "secret"))
