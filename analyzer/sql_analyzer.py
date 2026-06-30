@@ -26,6 +26,15 @@ DICTGET_FUNCTIONS = {
 # ClickHouse / psycopg2 параметры %(name)s ломают sqlglot (парсит % как modulo).
 # Заменяем на безопасный строковый литерал перед парсингом.
 _PY_PLACEHOLDER_RE = re.compile(r'%\(([a-zA-Z_][a-zA-Z0-9_]*)\)s')
+_DICTGET_RE = re.compile(
+    r"\bdict(?:Get[A-Za-z0-9_]*|Has|GetHierarchy|IsIn)\s*\(\s*(['\"])([^'\"]*\.[^'\"]*)\1",
+    re.IGNORECASE,
+)
+_PARTITION_ALTER_RE = re.compile(
+    r"\bALTER\s+TABLE\b.*?\bPARTITION\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_IGNORED_SCHEMAS = {"system"}
 
 
 def _preprocess_sql_for_parse(sql: str) -> str:
@@ -52,19 +61,23 @@ class SQLAnalyzer:
         """
         result = SQLAnalysisResult()
         self._temp_tables.clear()
+        parse_sql = self._remove_partition_alter_statements(sql)
 
         # Пробуем парсить через sqlglot
-        try:
-            statements = sqlglot.parse(_preprocess_sql_for_parse(sql), dialect=self.dialect)
-        except Exception as e:
-            # Fallback на regex если sqlglot не смог
-            result.warnings.append(f"sqlglot parse error: {e}, using regex fallback")
-            return self._analyze_with_regex(sql)
-
-        for statement in statements:
-            if statement is None:
-                continue
-            self._analyze_statement(statement, result)
+        if parse_sql.strip():
+            try:
+                statements = sqlglot.parse(_preprocess_sql_for_parse(parse_sql), dialect=self.dialect)
+            except Exception as e:
+                # Fallback на regex если sqlglot не смог
+                result.warnings.append(f"sqlglot parse error: {e}, using regex fallback")
+                fallback = self._analyze_with_regex(parse_sql)
+                fallback.warnings = result.warnings + fallback.warnings
+                result = fallback
+            else:
+                for statement in statements:
+                    if statement is None:
+                        continue
+                    self._analyze_statement(statement, result)
 
         # Дополнительно парсим ALTER TABLE через regex (sqlglot не поддерживает ATTACH/REPLACE PARTITION)
         self._extract_alter_table_partitions(sql, result)
@@ -75,6 +88,8 @@ class SQLAnalyzer:
         # Удаляем временные таблицы из результатов
         result.inlets = [t for t in result.inlets if t.full_name not in self._temp_tables]
         result.outlets = [t for t in result.outlets if t.full_name not in self._temp_tables]
+        self._extract_dictget_with_regex(sql, result)
+        self._filter_ignored_tables(result)
 
         # Убираем дубликаты
         result.inlets = list(set(result.inlets))
@@ -201,6 +216,13 @@ class SQLAnalyzer:
                         if table_ref:
                             result.dictionaries.append(table_ref)
 
+    def _extract_dictget_with_regex(self, sql: str, result: SQLAnalysisResult):
+        """Regex fallback for ClickHouse dictGet*/dictHas calls missed by sqlglot."""
+        for match in _DICTGET_RE.finditer(sql):
+            table_ref = self._parse_dict_name(match.group(2))
+            if table_ref:
+                result.dictionaries.append(table_ref)
+
     def _extract_alter_table_partitions(self, sql: str, result: SQLAnalysisResult):
         """Извлекает таблицы из ALTER TABLE ATTACH/REPLACE PARTITION через regex.
 
@@ -208,7 +230,12 @@ class SQLAnalyzer:
         поэтому используем regex для извлечения таблиц.
         """
         # Паттерн: ALTER TABLE schema.table ATTACH|REPLACE PARTITION ... FROM schema.table
-        alter_pattern = r'ALTER\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)\s+(?:ATTACH|REPLACE)\s+PARTITION\s+.*?FROM\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+        alter_pattern = (
+            r'ALTER\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+            r'(?:\s+ON\s+CLUSTER\s+[a-zA-Z_][a-zA-Z0-9_-]*)?'
+            r'\s+(?:ATTACH|REPLACE)\s+PARTITION\s+.*?FROM\s+'
+            r'([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_]+)'
+        )
 
         for match in re.finditer(alter_pattern, sql, re.IGNORECASE | re.DOTALL):
             target_full = match.group(1)  # -> outlet
@@ -355,12 +382,16 @@ class SQLAnalyzer:
         """
         results = []
         self._temp_tables.clear()
+        parse_sql = self._remove_partition_alter_statements(sql)
 
-        try:
-            statements = sqlglot.parse(_preprocess_sql_for_parse(sql), dialect=self.dialect)
-        except Exception:
-            # Fallback: возвращаем один общий результат
-            return [self.analyze(sql)]
+        if parse_sql.strip():
+            try:
+                statements = sqlglot.parse(_preprocess_sql_for_parse(parse_sql), dialect=self.dialect)
+            except Exception:
+                # Fallback: возвращаем один общий результат
+                return [self.analyze(sql)]
+        else:
+            statements = []
 
         # Первый проход: собираем temporary tables и их источники
         _temp_table_sources: Dict[str, List[TableReference]] = {}
@@ -434,6 +465,8 @@ class SQLAnalyzer:
             stmt_result.outlets = [t for t in stmt_result.outlets if t.full_name not in self._temp_tables]
 
             # Убираем дубликаты
+            self._extract_dictget_with_regex(statement.sql(dialect=self.dialect), stmt_result)
+            self._filter_ignored_tables(stmt_result)
             stmt_result.inlets = list(set(stmt_result.inlets))
             stmt_result.outlets = list(set(stmt_result.outlets))
             stmt_result.dictionaries = list(set(stmt_result.dictionaries))
@@ -451,6 +484,7 @@ class SQLAnalyzer:
         # ALTER/OPTIMIZE таблицы, не покрытые sqlglot — добавляем как отдельные statements
         # Группируем ALTER по парам (outlet, inlet)
         if alter_result.outlets or alter_result.inlets:
+            self._filter_ignored_tables(alter_result)
             # Каждый ALTER с FROM — отдельный flow (inlet→outlet)
             alter_outlets_seen = set()
             for i, outlet in enumerate(alter_result.outlets):
@@ -473,6 +507,23 @@ class SQLAnalyzer:
                     results.append(ar)
 
         return results if results else [SQLAnalysisResult()]
+
+    def _filter_ignored_tables(self, result: SQLAnalysisResult):
+        result.inlets = [t for t in result.inlets if t.schema not in _IGNORED_SCHEMAS]
+        result.outlets = [t for t in result.outlets if t.schema not in _IGNORED_SCHEMAS]
+        result.dictionaries = [t for t in result.dictionaries if t.schema not in _IGNORED_SCHEMAS]
+        result.remote_tables = [t for t in result.remote_tables if t.schema not in _IGNORED_SCHEMAS]
+
+    def _remove_partition_alter_statements(self, sql: str) -> str:
+        statements = []
+        for statement in sql.split(";"):
+            stripped = statement.strip()
+            if not stripped:
+                continue
+            if _PARTITION_ALTER_RE.search(stripped):
+                continue
+            statements.append(stripped)
+        return ";\n".join(statements)
 
     def _analyze_with_regex(self, sql: str) -> SQLAnalysisResult:
         """Fallback анализ через regex."""
@@ -564,6 +615,7 @@ class SQLAnalyzer:
                 ))
 
         # Убираем дубликаты
+        self._filter_ignored_tables(result)
         result.inlets = list(set(result.inlets))
         result.outlets = list(set(result.outlets))
         result.dictionaries = list(set(result.dictionaries))

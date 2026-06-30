@@ -9,6 +9,8 @@
 # При нескольких wildcard-совпадениях используется первый в списке.
 
 server_mapping:
+  click-do-ch13_sterhov: do-ch13
+  click-do-lake-r: do-lake-r
   do-ch-deliverytime: do-ch13
   do-ch4*: do-ch4         # do-ch4-pr, do-ch4-dl, do-ch4-dp → do-ch4
   do-ch8*: do-ch8         # do-ch8-xc и другие
@@ -19,4 +21,4 @@ server_mapping:
 # - error: выдавать ошибку если нет маппинга (не реализовано)
 default_behavior: passthrough
 
-strip_d_suffix: true
+strip_d_suffix: false

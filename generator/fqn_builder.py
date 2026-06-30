@@ -44,7 +44,8 @@ class FQNBuilder:
 
         config = {
             'server_mapping': self.mapping,
-            'default_behavior': self.default_behavior
+            'default_behavior': self.default_behavior,
+            'strip_d_suffix': self.strip_d_suffix,
         }
 
         with open(path, 'w', encoding='utf-8') as f:

@@ -12,8 +12,12 @@ class DAGParser:
     """Парсер Airflow DAG файлов."""
 
     # Ключевые слова SQL для эвристики
-    SQL_KEYWORDS = {'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'FROM', 'JOIN',
-                    'WHERE', 'GROUP', 'ORDER', 'HAVING', 'UNION', 'WITH'}
+    SQL_KEYWORDS = {
+        'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'FROM', 'JOIN',
+        'WHERE', 'GROUP', 'ORDER', 'HAVING', 'UNION', 'WITH',
+        'ALTER', 'TABLE', 'ATTACH', 'REPLACE', 'TRUNCATE', 'CREATE',
+        'OPTIMIZE',
+    }
 
     def __init__(self):
         self.result: Optional[DAGParseResult] = None
@@ -91,8 +95,9 @@ class DAGParser:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         var_name = target.id
-                        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                            self.result.string_variables[var_name] = node.value.value
+                        value = self._get_string_value(node.value)
+                        if value is not None:
+                            self.result.string_variables[var_name] = value
 
     def _extract_sql_variables(self, tree: ast.Module):
         """Извлекает переменные содержащие SQL."""
@@ -557,6 +562,16 @@ class DAGParser:
         elif isinstance(node, ast.JoinedStr):
             # f-string - собираем части
             return self._extract_fstring(node)
+        elif isinstance(node, ast.Name) and self.result:
+            if node.id in self.result.string_variables:
+                return self.result.string_variables[node.id]
+            if node.id in self.result.sql_variables:
+                return self.result.sql_variables[node.id]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._get_string_value(node.left)
+            right = self._get_string_value(node.right)
+            if left is not None and right is not None:
+                return left + right
         return None
 
     def _is_sql_string(self, value: str) -> bool:
@@ -579,7 +594,11 @@ class DAGParser:
                 continue
 
             func_node = func_nodes[func_name]
-            used_sql_vars = set()
+            used_sql_vars = []
+
+            def add_used_sql_var(sql_var: str) -> None:
+                if sql_var not in used_sql_vars:
+                    used_sql_vars.append(sql_var)
 
             # Собираем SQL переменные, используемые в cross-server вызовах —
             # они обрабатываются отдельно с правильными connection_id
@@ -594,7 +613,7 @@ class DAGParser:
             for node in ast.walk(func_node):
                 # Прямое использование SQL переменной
                 if isinstance(node, ast.Name) and node.id in self.result.sql_variables:
-                    used_sql_vars.add(node.id)
+                    add_used_sql_var(node.id)
 
                 # Вызовы hook.exec_with_log(SQL_VAR, ...) и подобные
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -609,7 +628,7 @@ class DAGParser:
                         for arg in node.args:
                             sql_var = self._resolve_sql_arg(arg)
                             if sql_var and sql_var in self.result.sql_variables:
-                                used_sql_vars.add(sql_var)
+                                add_used_sql_var(sql_var)
                                 if hook_name:
                                     self._add_sql_var_hook(func_info, sql_var, hook_name)
                                 # Track which hook executes this SQL var
@@ -621,9 +640,12 @@ class DAGParser:
                                     )
 
             # Исключаем SQL переменные из cross-server вызовов
-            used_sql_vars -= cross_server_sql_vars
+            used_sql_vars = [
+                sql_var for sql_var in used_sql_vars
+                if sql_var not in cross_server_sql_vars
+            ]
 
-            func_info.sql_variables = list(used_sql_vars)
+            func_info.sql_variables = used_sql_vars
 
     def _extract_api_usage(self, tree: ast.Module):
         """Извлекает HttpHook вызовы из функций."""

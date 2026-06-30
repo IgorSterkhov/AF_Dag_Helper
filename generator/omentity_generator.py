@@ -130,8 +130,9 @@ class OMEntityGenerator:
             connection_id, sql_result, func_info, dag_result, task, warnings
         )
 
-        # Разделяем SQL flows: primary connection и other connections
-        # Порядок: SQL(primary) → cross-server → SQL(other)
+        # Разделяем SQL flows: primary connection и other connections.
+        # Cross-server loads are emitted first; source-only cutoff reads on the
+        # same server are merged into that source-side flow.
         sql_primary = []
         sql_other = []
 
@@ -163,9 +164,13 @@ class OMEntityGenerator:
                 else:
                     sql_primary.append(sf)
 
+        if cs_flows:
+            sql_primary = self._merge_source_only_flows_into_cross_server(sql_primary, cs_flows)
+            sql_other = self._merge_source_only_flows_into_cross_server(sql_other, cs_flows)
+
         flows.extend(bulk_transfer_flows)
-        flows.extend(sql_primary)
         flows.extend(cs_flows)
+        flows.extend(sql_primary)
         flows.extend(sql_other)
 
         # Назначаем key через KeyAssigner
@@ -375,16 +380,74 @@ class OMEntityGenerator:
         # Merge flows с одинаковыми outlet-ами
         if len(flows) > 1:
             flows = self._merge_flows_by_outlet(flows)
+            flows = self._merge_sequential_sql_flows(flows)
 
         return flows
+
+    def _merge_source_only_flows_into_cross_server(
+        self,
+        source_flows: List[DataFlowGroup],
+        cross_server_flows: List[DataFlowGroup],
+    ) -> List[DataFlowGroup]:
+        """Attach no-outlet source reads to cross-server source-side lineage."""
+        remaining: List[DataFlowGroup] = []
+        for flow in source_flows:
+            if flow.outlets or not flow.inlets:
+                remaining.append(flow)
+                continue
+
+            merged = False
+            for cs_flow in cross_server_flows:
+                if self._source_flow_related_to_cross_server(flow, cs_flow):
+                    for item in flow.inlets:
+                        if item not in cs_flow.inlets:
+                            cs_flow.inlets.append(item)
+                    merged = True
+                    break
+            if not merged:
+                remaining.append(flow)
+        return remaining
+
+    def _source_flow_related_to_cross_server(
+        self,
+        source_flow: DataFlowGroup,
+        cross_server_flow: DataFlowGroup,
+    ) -> bool:
+        source_families = {
+            self._table_family(item.fqn)
+            for item in source_flow.inlets
+        }
+        cross_server_families = {
+            self._table_family(item.fqn)
+            for item in cross_server_flow.inlets
+        }
+        source_families.discard(None)
+        cross_server_families.discard(None)
+        return bool(source_families & cross_server_families)
+
+    def _table_family(self, fqn: str):
+        parts = fqn.split(".")
+        if len(parts) < 3:
+            return None
+
+        server = parts[0]
+        schema = ".".join(parts[1:-1])
+        table = parts[-1]
+        for suffix in ("_rc_d", "_rc", "_d"):
+            if table.endswith(suffix):
+                table = table[: -len(suffix)]
+                break
+        return server, schema, table
 
     def _merge_flows_by_outlet(self, flows: List[DataFlowGroup]) -> List[DataFlowGroup]:
         """Merge SQL flows that target the same outlet table(s)."""
         merged = {}  # frozenset(outlet_fqns) -> DataFlowGroup
         order = []   # preserve first-seen order
 
-        for flow in flows:
+        for index, flow in enumerate(flows):
             outlet_key = frozenset(item.fqn for item in flow.outlets)
+            if not outlet_key:
+                outlet_key = ("__source_only__", index)
             if outlet_key in merged:
                 existing = merged[outlet_key]
                 for item in flow.inlets:
@@ -400,6 +463,59 @@ class OMEntityGenerator:
                 order.append(outlet_key)
 
         return [merged[key] for key in order]
+
+    def _merge_sequential_sql_flows(self, flows: List[DataFlowGroup]) -> List[DataFlowGroup]:
+        """Merge SQL flows when one statement writes a table consumed by another."""
+        result: List[DataFlowGroup] = []
+        consumed_indexes = set()
+
+        for index, flow in enumerate(flows):
+            if index in consumed_indexes:
+                continue
+            if flow.flow_type != "sql":
+                result.append(flow)
+                continue
+
+            merged = DataFlowGroup(
+                flow_type=flow.flow_type,
+                inlets=list(flow.inlets),
+                outlets=list(flow.outlets),
+                source_description=flow.source_description,
+            )
+
+            changed = True
+            while changed:
+                changed = False
+                outlet_fqns = {item.fqn for item in merged.outlets}
+                for other_index, other in enumerate(flows):
+                    if (
+                        other_index <= index
+                        or other_index in consumed_indexes
+                        or other.flow_type != "sql"
+                    ):
+                        continue
+
+                    consumed_fqns = outlet_fqns & {item.fqn for item in other.inlets}
+                    if not consumed_fqns:
+                        continue
+
+                    for item in other.inlets:
+                        if item not in merged.inlets:
+                            merged.inlets.append(item)
+                    merged.outlets = [
+                        item for item in merged.outlets
+                        if item.fqn not in consumed_fqns
+                    ]
+                    for item in other.outlets:
+                        if item not in merged.outlets:
+                            merged.outlets.append(item)
+                    consumed_indexes.add(other_index)
+                    changed = True
+                    break
+
+            result.append(merged)
+
+        return result
 
     def _resolve_sql_var_connections(
         self,
@@ -521,6 +637,8 @@ class OMEntityGenerator:
                     flow.outlets.append(dst_item)
                 flows.append(flow)
 
+        if len(flows) > 1:
+            flows = self._merge_flows_by_outlet(flows)
         return flows
 
     def _build_cross_server_flows(
@@ -638,6 +756,8 @@ class OMEntityGenerator:
                             source_description=f'copy_ch_to_ch_pipe → {dst_conn} (no take_data)'
                         ))
 
+        if len(flows) > 1:
+            flows = self._merge_flows_by_outlet(flows)
         return flows
 
     def _resolve_connection_value(self, conn_var: str, dag_result: DAGParseResult) -> str:
